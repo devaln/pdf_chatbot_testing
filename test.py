@@ -294,7 +294,7 @@ Question: {q}
 Answer in bullet points or structured format.
 """
                     resp = llm.invoke(prompt)
-                    responses.append(f"*Q: {q}*\n{resp.strip()}")
+                    responses.append(f"*Q: {q}*\n{str(resp).strip()}")
                 final_response = "\n\n".join(responses)
                 st.markdown(final_response)
                 st.session_state.msgs.append({"role": "assistant", "content": final_response})
