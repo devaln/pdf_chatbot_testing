@@ -70,16 +70,9 @@ def clean_df(df):
     return df.fillna("")
 
 def df_to_text(df, title=None):
-    """
-    Convert DataFrame to readable text format.
-    Handles None and missing values gracefully.
-    """
-    rows = [title.strip() if isinstance(title, str) else ""]
+    rows = [f"{title or ''}".strip()]
     for _, row in df.iterrows():
-        row_str = " | ".join(
-            f"{str(col).strip() if col is not None else ''}: {str(val).strip() if val is not None else ''}"
-            for col, val in row.items()
-        )
+        row_str = " | ".join(f"{col.strip()}: {str(val).strip()}" for col, val in row.items())
         rows.append(row_str)
     return "\n".join(rows)
 
@@ -280,17 +273,28 @@ if query := st.chat_input("Ask a question..."):
         with st.chat_message("assistant"):
             with st.spinner("Searching documents..."):
                 results = st.session_state.vs.similarity_search_with_score(query, k=6)
-                doc_chunks = defaultdict(list)
-                doc_scores = defaultdict(list)
-                for doc, score in results:
-                    doc_chunks[doc.metadata.get("source", "")].append(doc.page_content)
-                    doc_scores[doc.metadata.get("source", "")].append(score)
-                best_doc = min(doc_scores, key=lambda d: np.mean(doc_scores[d]))
-                context = "\n\n".join(doc_chunks[best_doc])
-                prompt = f"You are an expert. Answer strictly using the below context:\n\n{context}\n\nQuestion: {query}"
+                top_chunks = [f"[Source: {doc.metadata.get('source', 'unknown')}]\n{doc.page_content}" for doc, score in sorted(results, key=lambda x: x[1])[:5]]
+                context = "\n\n".join(top_chunks)
+
+                sub_questions = [q.strip() for q in query.replace("&", " and ").split(" and ") if q.strip()]
+                responses = []
                 llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
-                response = llm.invoke(prompt)
-                st.markdown(response)
-                st.session_state.msgs.append({"role": "assistant", "content": response})
+                for q in sub_questions:
+                    prompt = f"""
+You are an expert assistant. Use ONLY the context below to answer the question.
+If the answer is not present, say "Not found in the provided documents.".
+
+Context:
+{context}
+
+Question: {q}
+Answer in bullet points or structured format.
+"""
+                    resp = llm.invoke(prompt)
+                    responses.append(f"*Q: {q}*\n{resp.strip()}")
+
+                final_response = "\n\n".join(responses)
+                st.markdown(final_response)
+                st.session_state.msgs.append({"role": "assistant", "content": final_response})
     else:
         st.error("Please upload and index files first.")
