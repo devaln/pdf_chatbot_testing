@@ -64,7 +64,7 @@ def extract_tables_pdfplumber(pdf_path):
                         df = pd.DataFrame(table[1:], columns=table[0])
                         df = clean_df(df)
 
-                        # Try to find table title from line above header
+                        # Try to detect table name: find matching header in page text and get line above
                         title = ""
                         for i, line in enumerate(page_text_lines):
                             if all(col.strip() in line for col in table[0] if col):
@@ -148,9 +148,9 @@ def extract_all_tables(pdf_path, scanned_mode=False):
     except Exception as e:
         logging.error(f"Text extraction failed: {e}")
 
-    return "\n\n".join(dfs), full_text  # dfs contains string blocks with table title + CSV
+    return "\n\n".join(dfs), full_text  # dfs contains table blocks with title + CSV
 
-# 🚫 Removed caching decorator to avoid FAISS pickle error
+# 🔧 FAISS Load without caching (to avoid Pickle issue)
 def load_and_index(files, scanned_mode=False):
     all_docs = []
     with tempfile.TemporaryDirectory() as td:
