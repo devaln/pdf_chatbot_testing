@@ -27,7 +27,7 @@ langchain-community
 ollama
 
 # FAISS with GPU Support
-faiss-gpu
+faiss
 
 # GPU-Accelerated Deep Learning (Torch + CUDA 11.8)
 torch==2.1.2+cu118
