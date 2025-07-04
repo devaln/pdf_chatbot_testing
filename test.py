@@ -152,7 +152,17 @@ def extract_all_tables(pdf_path, scanned_mode=False):
 
 # 🔧 FAISS Load without caching (to avoid Pickle issue)
 def load_and_index(files, scanned_mode=False):
-    all_docs = []
+    # Embedder for all cases
+    embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
+
+    # Load previous index if exists
+    if os.path.exists(os.path.join(DB_DIR, "index.faiss")):
+        vs = FAISS.load_local(DB_DIR, embed)
+    else:
+        vs = None
+
+    # Process new files
+    new_docs = []
     with tempfile.TemporaryDirectory() as td:
         for file in files:
             path = os.path.join(td, file.name)
@@ -160,27 +170,25 @@ def load_and_index(files, scanned_mode=False):
                 f.write(file.getbuffer())
             try:
                 loader = PyPDFLoader(path)
-                all_docs.extend(loader.load())
+                new_docs.extend(loader.load())
                 tables_text, full_text = extract_all_tables(path, scanned_mode)
-                all_docs.append(Document(page_content=tables_text + "\n" + full_text, metadata={"source": file.name}))
+                new_docs.append(Document(page_content=tables_text + "\n" + full_text, metadata={"source": file.name}))
             except Exception as e:
-                logging.error(f"Failed: {e}")
-                st.error(f"Failed: {e}")
+                st.error(f"Failed to process {file.name}: {e}")
 
-    if not all_docs:
-        return None
+    if not new_docs:
+        return vs  # Return existing (if any)
 
-    chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(all_docs)
-    embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
+    # Split new documents
+    chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(new_docs)
 
-    if os.path.exists(os.path.join(DB_DIR, "index.faiss")):
-        vs = FAISS.load_local(DB_DIR, embed)
+    # Create or update FAISS index
+    if vs:
         vs.add_documents(chunks)
     else:
         vs = FAISS.from_documents(chunks, embed)
 
     vs.save_local(DB_DIR)
-    st.success("✅ Index updated.")
     return vs
 
 def get_chat_chain(vs):
