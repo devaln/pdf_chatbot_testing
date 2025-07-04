@@ -12,9 +12,6 @@ import pdfplumber
 import camelot
 import pytesseract
 from pdf2image import convert_from_path
-import json
-import uuid
-from datetime import datetime
 from difflib import SequenceMatcher
 
 from langchain_community.document_loaders import PyPDFLoader
@@ -25,12 +22,12 @@ from langchain_community.chat_models import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
-from langchain_core.runnables import RunnablePassthrough, Runnable
+from langchain_core.runnables import RunnablePassthrough
 
 # --- Config ---
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_LLM_MODEL = "llama3:latest"
+OLLAMA_LLM_MODEL = "llama3:latest"  # or llama4:latest
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 CHAT_DIR = "./chat_sessions"
@@ -197,13 +194,13 @@ def load_and_index(files, scanned_mode=False):
         logging.error(f"Indexing error: {e}")
         return None
 
-# --- Filter Retriever to reduce mixed context ---
-class TopKFilterRetriever(Runnable):
+# --- TopK Filter Retriever (fixed, callable version) ---
+class TopKFilterRetriever:
     def _init_(self, retriever, top_k=8):
         self.retriever = retriever
         self.top_k = top_k
 
-    def invoke(self, query, config=None):
+    def _call_(self, query, config=None):
         docs = self.retriever.get_relevant_documents(query)
         if not docs:
             return ""
@@ -216,10 +213,12 @@ class TopKFilterRetriever(Runnable):
 
 def get_chat_chain(vs):
     retriever = vs.as_retriever(search_kwargs={"k": 10})
-    filtered = TopKFilterRetriever(retriever)
-    prompt = ChatPromptTemplate.from_template("You are a table analysis expert.\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:")
+    filtered_retriever = TopKFilterRetriever(retriever)
+    prompt = ChatPromptTemplate.from_template(
+        "You are a table analysis expert.\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:"
+    )
     llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
-    return {"context": filtered, "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
+    return {"context": filtered_retriever, "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
 
 # --- UI ---
 st.sidebar.image("img/ACL_Digital.png", width=180)
