@@ -74,7 +74,7 @@ def extract_tables_layoutparser(pdf_path, show_debug=False):
         all_tables = []
 
         for idx, image in enumerate(images):
-            layout = lp.detectron2_layout_model('lp://PubLayNet/naive').detect(image)  # NOTE: This line is skipped now (Detectron2 removed)
+            # layout = lp.detectron2_layout_model('lp://PubLayNet/naive').detect(image)  # NOTE: This line is skipped now (Detectron2 removed)
             layout = lp.load_layout_model("lp://prima_layout/mask_rcnn")  # Non-Detectron fallback
             layout = layout.detect(image)
 
