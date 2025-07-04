@@ -1,22 +1,41 @@
+# Streamlit UI
 streamlit>=1.30.0
+
+# Core Python Data/Utility Libraries
 pandas>=1.5.3
-numpy>=1.23.0
+numpy>=1.23.5
 Pillow>=9.5.0
-PyMuPDF>=1.23.0
-pdfplumber>=0.10.2
-camelot-py[cv]>=0.11.0
-pytesseract>=0.3.10
-pdf2image>=1.16.3
-python-docx>=1.0.0
-langchain>=0.1.14
-faiss-cpu>=1.7.4
-langchain-community>=0.0.30
-langchain-core>=0.1.52
-tqdm>=4.66.2
-uuid>=1.30
-nomic==1.1.9
 requests>=2.31.0
-PyPDF2>=3.0.1
-openpyxl>=3.1.2
-matplotlib>=3.7.2
-scikit-learn>=1.3.2
+
+# PDF Parsing & Image Conversion
+PyMuPDF>=1.22.0        # for 'fitz'
+pdfplumber>=0.10.2
+pdf2image>=1.16.3
+
+# Table Extraction
+camelot-py[cv]>=0.11.0
+
+# OCR
+pytesseract>=0.3.10
+
+# LangChain Core & Community
+langchain>=0.1.16
+langchain-core>=0.1.45
+langchain-community>=0.0.30
+
+# Ollama LLM + Embeddings (external running Ollama server required)
+ollama>=0.1.6
+
+# FAISS with GPU Support
+faiss-gpu>=1.7.4
+
+# GPU-Accelerated Deep Learning (Torch + CUDA 11.8)
+torch==2.1.2+cu118
+torchvision==0.16.2+cu118
+torchaudio==2.1.2+cu118
+--find-links https://download.pytorch.org/whl/torch_stable.html
+
+# Logging & Utilities
+loguru>=0.7.2
+opencv-python-headless>=4.8.0.76
+python-dotenv>=1.0.1
