@@ -1,41 +1,34 @@
-# Streamlit UI
+# Core App & UI
 streamlit
-
-# Core Python Data/Utility Libraries
 pandas
 numpy
 Pillow
-requests
-
-# PDF Parsing & Image Conversion
+pdf2image
 PyMuPDF
 pdfplumber
-pdf2image
-
-# Table Extraction
 camelot-py[cv]
 
 # OCR
 pytesseract
 
-# LangChain Core & Community
+# Fuzzy Matching
+fuzzywuzzy
+python-Levenshtein
+
+# LangChain + Ollama
 langchain
-langchain-core
 langchain-community
+langchain-core
+langchain-text-splitters
+langchainhub
+langchain-experimental
 
-# Ollama LLM + Embeddings (external running Ollama server required)
-ollama
-
-# FAISS with GPU Support
+# Embeddings & Vector Store
 faiss-cpu
+nomic
 
-# GPU-Accelerated Deep Learning (Torch + CUDA 11.8)
-torch
-torchvision
-torchaudio
---find-links https://download.pytorch.org/whl/torch_stable.html
+# PDF dependencies (for pdf2image)
+poppler-utils  # Not installable via pip. Required system dependency for pdf2image.
 
-# Logging & Utilities
+# Optional Logging
 loguru
-opencv-python-headless
-python-dotenv
