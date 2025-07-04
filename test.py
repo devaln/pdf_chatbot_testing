@@ -15,6 +15,7 @@ from pdf2image import convert_from_path
 import json
 import uuid
 from datetime import datetime
+from difflib import SequenceMatcher
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -44,16 +45,28 @@ def clean_df(df):
     df.columns = pd.io.parsers.ParserBase({'names': df.columns})._maybe_dedup_names(df.columns)
     return df.fillna("")
 
+def headers_similar(h1, h2, threshold=0.8):
+    return SequenceMatcher(None, ",".join(h1), ",".join(h2)).ratio() > threshold
+
 def extract_tables_pdfplumber(pdf_path):
     dfs = []
     try:
         with pdfplumber.open(pdf_path) as pdf:
+            last_df = None
             for page in pdf.pages:
                 tables = page.extract_tables()
                 for table in tables:
                     if table:
                         df = pd.DataFrame(table[1:], columns=table[0])
-                        dfs.append(clean_df(df))
+                        df = clean_df(df)
+                        if last_df is not None and headers_similar(last_df.columns.tolist(), df.columns.tolist()):
+                            last_df = pd.concat([last_df, df], ignore_index=True)
+                        else:
+                            if last_df is not None:
+                                dfs.append(last_df)
+                            last_df = df
+            if last_df is not None:
+                dfs.append(last_df)
     except Exception as e:
         logging.warning(f"pdfplumber failed: {e}")
     return dfs
@@ -107,7 +120,19 @@ def extract_scanned_pdf_with_ocr(pdf_path):
         if not full_dfs:
             return "", ""
 
-        combined = pd.concat(full_dfs).reset_index(drop=True)
+        stitched = []
+        last_df = None
+        for df in full_dfs:
+            if last_df is not None and headers_similar(last_df.columns.tolist(), df.columns.tolist()):
+                last_df = pd.concat([last_df, df], ignore_index=True)
+            else:
+                if last_df is not None:
+                    stitched.append(last_df)
+                last_df = df
+        if last_df is not None:
+            stitched.append(last_df)
+
+        combined = pd.concat(stitched).reset_index(drop=True)
         csv_text = combined.to_csv(index=False)
         return csv_text, combined.to_string(index=False)
     except Exception as e:
