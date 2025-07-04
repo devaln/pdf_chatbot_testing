@@ -2,17 +2,15 @@
 import os
 import tempfile
 import shutil
-import logging
-from collections import defaultdict
 import streamlit as st
 import pandas as pd
 import numpy as np
 from PIL import Image
 import fitz  # PyMuPDF
 import pdfplumber
-import camelot
-import pytesseract
 from pdf2image import convert_from_path
+import pytesseract
+import layoutparser as lp
 from fuzzywuzzy import fuzz
 
 from langchain.agents import Tool, AgentExecutor, create_react_agent
@@ -32,7 +30,7 @@ OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
 st.set_page_config(page_title="PDF QA + Table Agent", layout="wide")
-st.title("📄 PDF QA with Table Matching + Pandas Agent")
+st.title("📄 PDF QA with Table Matching + LayoutParser")
 
 # --- Session State ---
 if "vs" not in st.session_state:
@@ -78,53 +76,51 @@ def df_to_text(df, title=None):
         rows.append(row_str)
     return "\n".join(rows)
 
-def extract_scanned_table(pdf_path):
-    try:
-        images = convert_from_path(pdf_path)
-        stitched_tables = []
-        prev_headers = None
-        current_rows = []
+# --- LayoutParser OCR for Scanned PDFs ---
+def extract_tables_layoutparser(pdf_path):
+    images = convert_from_path(pdf_path)
+    agent = lp.TesseractAgent(languages='eng')
+    all_tables = []
 
-        for img in images:
-            data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DATAFRAME)
-            data = data.dropna(subset=["text"])
-            data = data[data['conf'].astype(int) > 40]
-            grouped = data.groupby(['block_num', 'par_num', 'line_num'])
+    for img in images:
+        layout = agent.detect(img)
 
-            rows = []
-            for _, group in grouped:
-                line = group.sort_values("left")["text"].tolist()
-                rows.append(line)
+        blocks = [b for b in layout if b.type == 'Text']
+        blocks = sorted(blocks, key=lambda b: (b.block.y_1, b.block.x_1))
 
-            if not rows:
+        rows = []
+        current_row = []
+        prev_y = None
+
+        for block in blocks:
+            y = block.block.y_1
+            text = block.text.strip()
+            if not text:
                 continue
-
-            max_cols = max(len(row) for row in rows)
-            padded = [row + [""] * (max_cols - len(row)) for row in rows]
-            df_raw = pd.DataFrame(padded).replace("", pd.NA).dropna(how="all").fillna("")
-
-            header_row_idx = df_raw.apply(lambda r: r.str.len().gt(1).sum(), axis=1).idxmax()
-            headers = df_raw.iloc[header_row_idx].tolist()
-            headers = [h if h.strip() else f"col{i}" for i, h in enumerate(headers)]
-
-            df = df_raw.iloc[header_row_idx + 1:].reset_index(drop=True)
-            df.columns = headers
-
-            if prev_headers and headers == prev_headers:
-                current_rows.append(df)
+            if prev_y is None or abs(y - prev_y) < 15:
+                current_row.append((block.block.x_1, text))
             else:
-                if current_rows:
-                    stitched_tables.append(pd.concat(current_rows, ignore_index=True))
-                current_rows = [df]
-                prev_headers = headers
+                row_sorted = [t[1] for t in sorted(current_row, key=lambda x: x[0])]
+                rows.append(row_sorted)
+                current_row = [(block.block.x_1, text)]
+            prev_y = y
 
-        if current_rows:
-            stitched_tables.append(pd.concat(current_rows, ignore_index=True))
+        if current_row:
+            row_sorted = [t[1] for t in sorted(current_row, key=lambda x: x[0])]
+            rows.append(row_sorted)
 
-        return stitched_tables
-    except Exception as e:
-        return []
+        if len(rows) < 2:
+            continue
 
+        max_len = max(len(r) for r in rows)
+        padded_rows = [r + [""] * (max_len - len(r)) for r in rows]
+        df = pd.DataFrame(padded_rows[1:], columns=padded_rows[0])
+        df = df.replace("", np.nan).dropna(how="all").fillna("")
+        all_tables.append(df)
+
+    return all_tables
+
+# --- Unscanned PDF Extractor ---
 def extract_tables_pdf(pdf_path):
     results = []
     prev_header = None
@@ -166,12 +162,11 @@ def extract_tables_pdf(pdf_path):
 
 def extract_all_tables(path, scanned):
     if scanned:
-        dfs = extract_scanned_table(path)
+        dfs = extract_tables_layoutparser(path)
         return [(df, "") for df in dfs]
     return extract_tables_pdf(path)
 
-# rest of the code remains unchanged
-
+# --- Load and Index ---
 def load_and_index(files, scanned=False):
     embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
     docs = []
@@ -214,7 +209,7 @@ def fuzzy_match_table(query):
             best_table = table
     return best_table if best_score >= 70 else None
 
-# --- Agent Logic ---
+# --- Pandas Agent ---
 def run_pandas_agent(df, user_query):
     llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
     tool = Tool(name="pandas_agent", description="Execute Python code to analyze a table", func=PythonREPLTool().run)
@@ -281,7 +276,6 @@ if query := st.chat_input("Ask a question..."):
                     for doc, score in sorted(results, key=lambda x: x[1])[:5]
                 ]
                 context = "\n\n".join(top_chunks)
-
                 sub_questions = [q.strip() for q in query.replace("&", " and ").split(" and ") if q.strip()]
                 responses = []
                 llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
@@ -297,8 +291,7 @@ Question: {q}
 Answer in bullet points or structured format.
 """
                     resp = llm.invoke(prompt)
-                    responses.append(f"*Q: {q}*\n{resp.content.strip()}")
-
+                    responses.append(f"*Q: {q}*\n{resp.strip()}")
                 final_response = "\n\n".join(responses)
                 st.markdown(final_response)
                 st.session_state.msgs.append({"role": "assistant", "content": final_response})
