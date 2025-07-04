@@ -53,7 +53,17 @@ section[data-testid="stSidebar"] {
 
 # --- Helpers ---
 def clean_df(df):
-    df.columns = pd.io.parsers.ParserBase({'names': df.columns})._maybe_dedup_names(df.columns)
+    # Deduplicate column names manually
+    seen = {}
+    new_columns = []
+    for col in df.columns:
+        count = seen.get(col, 0)
+        if count:
+            new_columns.append(f"{col}_{count}")
+        else:
+            new_columns.append(col)
+        seen[col] = count + 1
+    df.columns = new_columns
     return df.fillna("")
 
 def df_to_text(df, title=None):
