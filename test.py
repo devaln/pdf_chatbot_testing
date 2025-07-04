@@ -3,32 +3,32 @@ import os
 import tempfile
 import shutil
 import logging
-from collections import defaultdict
 import streamlit as st
 import pandas as pd
 import numpy as np
 from PIL import Image
 import fitz  # PyMuPDF
 import pdfplumber
+import camelot
 import pytesseract
 from pdf2image import convert_from_path
 from fuzzywuzzy import fuzz
-
 from langchain_community.chat_models import ChatOllama
-from langchain_core.prompts import PromptTemplate
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from collections import defaultdict
 
 # --- Config ---
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_LLM_MODEL = "llama4:latest"
+OLLAMA_LLM_MODEL = "llama3:latest"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
-st.set_page_config(page_title="PDF QA with LLaMA4", layout="wide")
+# --- Streamlit UI ---
+st.set_page_config(page_title="PDF QA using LLaMA4", layout="wide")
 st.title("📄 PDF QA using LLaMA4")
 
 # --- Session State ---
@@ -53,30 +53,13 @@ section[data-testid="stSidebar"] {
 
 # --- Helpers ---
 def clean_df(df):
-    # Deduplicate column names manually
-    seen = {}
-    new_columns = []
-    for col in df.columns:
-        count = seen.get(col, 0)
-        if count:
-            new_columns.append(f"{col}_{count}")
-        else:
-            new_columns.append(col)
-        seen[col] = count + 1
-    df.columns = new_columns
+    df.columns = [str(c) if c else f"col{i}" for i, c in enumerate(df.columns)]
     return df.fillna("")
 
 def df_to_text(df, title=None):
-    """
-    Convert DataFrame to readable text format.
-    Handles None and missing values gracefully.
-    """
-    rows = [title.strip() if isinstance(title, str) else ""]
+    rows = [f"{title or ''}".strip()]
     for _, row in df.iterrows():
-        row_str = " | ".join(
-            f"{str(col).strip() if col is not None else ''}: {str(val).strip() if val is not None else ''}"
-            for col, val in row.items()
-        )
+        row_str = " | ".join(f"{str(col).strip()}: {str(val).strip()}" for col, val in row.items())
         rows.append(row_str)
     return "\n".join(rows)
 
@@ -170,8 +153,7 @@ def extract_all_tables(path, scanned):
     if scanned:
         dfs = extract_scanned_table(path)
         return [(df, "") for df in dfs]
-    tables = extract_tables_pdf(path)
-    return tables
+    return extract_tables_pdf(path)
 
 def load_and_index(files, scanned=False):
     embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
@@ -216,11 +198,11 @@ def fuzzy_match_table(query):
     return best_table if best_score >= 70 else None
 
 # --- Sidebar UI ---
-st.sidebar.header("\U0001F4C2 Upload PDFs")
+st.sidebar.header("📂 Upload PDFs")
 uploaded = st.sidebar.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True, key=st.session_state.uploader_key)
-scanned_mode = st.sidebar.checkbox("\U0001F4F8 Is Scanned PDF?", value=False)
+scanned_mode = st.sidebar.checkbox("📸 Is Scanned PDF?", value=False)
 
-if st.sidebar.button("\U0001F4CA Extract & Index"):
+if st.sidebar.button("📊 Extract & Index"):
     if uploaded:
         with st.spinner("Indexing documents..."):
             load_and_index(uploaded, scanned=scanned_mode)
@@ -228,9 +210,9 @@ if st.sidebar.button("\U0001F4CA Extract & Index"):
             st.session_state.uploader_key += 1
             st.session_state.msgs = [{"role": "assistant", "content": "Ask about any table or row!"}]
 
-if st.sidebar.button("\U0001F9F9 Clear Chat"):
+if st.sidebar.button("🧹 Clear Chat"):
     st.session_state.msgs = []
-if st.sidebar.button("\U0001F5D1 Clear DB"):
+if st.sidebar.button("🗑 Clear DB"):
     shutil.rmtree(DB_DIR, ignore_errors=True)
     st.session_state.vs = None
     st.session_state.tables = []
@@ -249,13 +231,14 @@ if query := st.chat_input("Ask a question..."):
     table = fuzzy_match_table(query)
     if table:
         with st.chat_message("assistant"):
-            with st.spinner(f"Using table: {table['table_title']}"):
-                table_text = df_to_text(table["data"], table["table_title"])
-                prompt = f"You are a helpful assistant. Below is a table:\n\n{table_text}\n\nAnswer the following question:\n{query}"
-                llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
-                response = llm.invoke(prompt)
-                st.markdown(f"*Matched Table:* {table['table_title']}\n\n{response}")
-                st.session_state.msgs.append({"role": "assistant", "content": response})
+            st.markdown(f"*Matched Table:* {table['table_title']}")
+            context = df_to_text(table["data"], table["table_title"])
+            prompt = f"Answer the following using the table:\n\n{context}\n\nQuestion: {query}"
+            llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
+            response = llm.invoke(prompt)
+            answer = response.content if hasattr(response, "content") else str(response)
+            st.markdown(answer)
+            st.session_state.msgs.append({"role": "assistant", "content": answer})
     elif st.session_state.vs:
         with st.chat_message("assistant"):
             with st.spinner("Searching documents..."):
@@ -267,10 +250,11 @@ if query := st.chat_input("Ask a question..."):
                     doc_scores[doc.metadata.get("source", "")].append(score)
                 best_doc = min(doc_scores, key=lambda d: np.mean(doc_scores[d]))
                 context = "\n\n".join(doc_chunks[best_doc])
-                prompt = f"You are an expert. Answer strictly using the below context:\n\n{context}\n\nQuestion: {query}"
+                prompt = f"You are a helpful assistant. Use only this context:\n\n{context}\n\nQuestion: {query}"
                 llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
                 response = llm.invoke(prompt)
-                st.markdown(response)
-                st.session_state.msgs.append({"role": "assistant", "content": response})
+                answer = response.content if hasattr(response, "content") else str(response)
+                st.markdown(answer)
+                st.session_state.msgs.append({"role": "assistant", "content": answer})
     else:
         st.error("Please upload and index files first.")
