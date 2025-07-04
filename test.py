@@ -13,8 +13,6 @@ import fitz  # PyMuPDF
 import pytesseract
 from pdf2image import convert_from_path
 from fuzzywuzzy import fuzz
-
-import layoutparser as lp
 import matplotlib.pyplot as plt
 
 from langchain.agents import Tool, AgentExecutor, create_react_agent
@@ -33,8 +31,8 @@ OLLAMA_LLM_MODEL = "llama3"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
-st.set_page_config(page_title="PDF QA + LayoutParser", layout="wide")
-st.title("📄 PDF QA with Table Matching + LayoutParser")
+st.set_page_config(page_title="PDF QA without LayoutParser", layout="wide")
+st.title("📄 PDF QA with Table Matching (No LayoutParser)")
 
 # --- Session State ---
 if "vs" not in st.session_state:
@@ -68,56 +66,62 @@ def df_to_text(df, title=None):
         lines.append(row_str)
     return "\n".join(lines)
 
-def extract_tables_layoutparser(pdf_path, show_debug=False):
+def extract_tables_scanned_ocr(pdf_path, show_debug=False):
     try:
         images = convert_from_path(pdf_path)
         all_tables = []
 
-        for idx, image in enumerate(images):
-            # layout = lp.detectron2_layout_model('lp://PubLayNet/naive').detect(image)  # NOTE: This line is skipped now (Detectron2 removed)
-            layout = lp.load_layout_model("lp://prima_layout/mask_rcnn")  # Non-Detectron fallback
-            layout = layout.detect(image)
-
-            blocks = [b for b in layout if b.type == "Text"]
-            blocks.sort(key=lambda b: (b.block.y_1, b.block.x_1))
+        for page_num, image in enumerate(images):
+            ocr_data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DATAFRAME)
+            ocr_data = ocr_data[ocr_data.conf != -1].dropna(subset=['text'])
+            ocr_data = ocr_data[ocr_data.text.str.strip().astype(bool)]
 
             lines = []
-            for block in blocks:
-                text = pytesseract.image_to_string(image.crop(block.coordinates), config="--psm 6")
-                if text.strip():
-                    lines.append(text.strip())
+            current_line = []
+            last_y = None
 
-            lines = [line.split() for line in lines if line.strip()]
-            max_cols = max((len(row) for row in lines), default=0)
-            padded = [row + [""] * (max_cols - len(row)) for row in lines]
-            df = pd.DataFrame(padded)
+            for _, row in ocr_data.iterrows():
+                if last_y is None or abs(row['top'] - last_y) <= 10:
+                    current_line.append(row)
+                else:
+                    lines.append(current_line)
+                    current_line = [row]
+                last_y = row['top']
+            if current_line:
+                lines.append(current_line)
 
-            if df.empty:
+            table_rows = []
+            for line in lines:
+                sorted_line = sorted(line, key=lambda r: r['left'])
+                table_rows.append([r['text'] for r in sorted_line])
+
+            if not table_rows:
                 continue
 
-            # Header detection using visual density
-            header_row_idx = df.apply(lambda r: r.str.len().gt(1).sum(), axis=1).idxmax()
-            headers = df.iloc[header_row_idx].tolist()
+            max_cols = max(len(r) for r in table_rows)
+            padded = [r + [""] * (max_cols - len(r)) for r in table_rows]
+            df = pd.DataFrame(padded)
+
+            header_idx = df.apply(lambda r: r.str.len().gt(2).sum(), axis=1).idxmax()
+            headers = df.iloc[header_idx].tolist()
             headers = [h if h.strip() else f"col{i}" for i, h in enumerate(headers)]
-            df_data = df.iloc[header_row_idx + 1:].reset_index(drop=True)
+            df_data = df.iloc[header_idx + 1:].reset_index(drop=True)
             df_data.columns = headers
             all_tables.append(df_data)
 
-            # Optional: Debug overlay
             if show_debug:
                 fig, ax = plt.subplots()
                 ax.imshow(image)
-                for block in blocks:
-                    x1, y1, x2, y2 = block.coordinates
-                    ax.add_patch(plt.Rectangle((x1, y1), x2 - x1, y2 - y1,
-                                               fill=False, edgecolor='red', linewidth=1))
-                    ax.text(x1, y1 - 5, block.type, fontsize=6, color='blue')
-                ax.set_title(f"OCR Block Overlay - Page {idx+1}")
+                for _, row in ocr_data.iterrows():
+                    x, y, w, h = row['left'], row['top'], row['width'], row['height']
+                    ax.add_patch(plt.Rectangle((x, y), w, h, edgecolor='red', fill=False, linewidth=1))
+                    ax.text(x, y - 2, row['text'], fontsize=5, color='blue')
+                ax.set_title(f"OCR Overlay - Page {page_num+1}")
                 st.pyplot(fig)
 
         return [(df, "") for df in all_tables]
     except Exception as e:
-        st.error(f"OCR extraction failed: {e}")
+        st.error(f"OCR table extraction failed: {e}")
         return []
 
 def extract_tables_text(pdf_path):
@@ -132,7 +136,7 @@ def extract_tables_text(pdf_path):
 
 def extract_all_tables(path, scanned=False, show_debug=False):
     if scanned:
-        return extract_tables_layoutparser(path, show_debug)
+        return extract_tables_scanned_ocr(path, show_debug)
     return []
 
 def load_and_index(files, scanned=False, show_debug=False):
@@ -173,7 +177,6 @@ def fuzzy_match_table(query):
             best_table = table
     return best_table if best_score >= 70 else None
 
-# --- Agent Logic ---
 def run_pandas_agent(df, user_query):
     llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
     tool = Tool(name="pandas_agent", description="Executes Python code to analyze a table", func=PythonREPLTool().run)
