@@ -27,7 +27,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # --- Config ---
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_LLM_MODEL = "llama3"
+OLLAMA_LLM_MODEL = "llama3:latest"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
