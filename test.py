@@ -23,13 +23,13 @@ from collections import defaultdict
 # --- Config ---
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_LLM_MODEL = "llama3:latest"
+OLLAMA_LLM_MODEL = "llama4:latest"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="PDF QA using LLaMA4", layout="wide")
-st.title("📄 PDF QA using LLaMA4")
+st.title("\U0001F4C4 PDF QA using LLaMA4")
 
 # --- Session State ---
 if "vs" not in st.session_state:
@@ -198,11 +198,11 @@ def fuzzy_match_table(query):
     return best_table if best_score >= 70 else None
 
 # --- Sidebar UI ---
-st.sidebar.header("📂 Upload PDFs")
+st.sidebar.header("\U0001F4C2 Upload PDFs")
 uploaded = st.sidebar.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True, key=st.session_state.uploader_key)
-scanned_mode = st.sidebar.checkbox("📸 Is Scanned PDF?", value=False)
+scanned_mode = st.sidebar.checkbox("\U0001F4F8 Is Scanned PDF?", value=False)
 
-if st.sidebar.button("📊 Extract & Index"):
+if st.sidebar.button("\U0001F4CA Extract & Index"):
     if uploaded:
         with st.spinner("Indexing documents..."):
             load_and_index(uploaded, scanned=scanned_mode)
@@ -210,9 +210,9 @@ if st.sidebar.button("📊 Extract & Index"):
             st.session_state.uploader_key += 1
             st.session_state.msgs = [{"role": "assistant", "content": "Ask about any table or row!"}]
 
-if st.sidebar.button("🧹 Clear Chat"):
+if st.sidebar.button("\U0001F9F9 Clear Chat"):
     st.session_state.msgs = []
-if st.sidebar.button("🗑 Clear DB"):
+if st.sidebar.button("\U0001F5D1 Clear DB"):
     shutil.rmtree(DB_DIR, ignore_errors=True)
     st.session_state.vs = None
     st.session_state.tables = []
@@ -242,15 +242,27 @@ if query := st.chat_input("Ask a question..."):
     elif st.session_state.vs:
         with st.chat_message("assistant"):
             with st.spinner("Searching documents..."):
-                results = st.session_state.vs.similarity_search_with_score(query, k=6)
+                results = st.session_state.vs.similarity_search_with_score(query, k=8)
                 doc_chunks = defaultdict(list)
                 doc_scores = defaultdict(list)
                 for doc, score in results:
                     doc_chunks[doc.metadata.get("source", "")].append(doc.page_content)
                     doc_scores[doc.metadata.get("source", "")].append(score)
-                best_doc = min(doc_scores, key=lambda d: np.mean(doc_scores[d]))
-                context = "\n\n".join(doc_chunks[best_doc])
-                prompt = f"You are a helpful assistant. Use only this context:\n\n{context}\n\nQuestion: {query}"
+                top_docs = sorted(doc_scores.items(), key=lambda x: np.mean(x[1]))[:3]
+                context_parts = []
+                for docname, _ in top_docs:
+                    context_parts.extend(doc_chunks[docname])
+                context = "\n\n".join(context_parts)
+                prompt = f"""
+You are a helpful assistant working with multiple documents.
+Use relevant information from the below context to answer the question accurately.
+
+--- CONTEXT START ---
+{context}
+--- CONTEXT END ---
+
+Question: {query}
+"""
                 llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
                 response = llm.invoke(prompt)
                 answer = response.content if hasattr(response, "content") else str(response)
