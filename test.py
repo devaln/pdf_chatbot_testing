@@ -2,7 +2,6 @@
 import os
 import tempfile
 import shutil
-import logging
 from collections import defaultdict
 import streamlit as st
 import pandas as pd
@@ -14,6 +13,8 @@ import camelot
 import pytesseract
 from pdf2image import convert_from_path
 from fuzzywuzzy import fuzz
+import cv2
+import difflib
 
 from langchain.agents import Tool, AgentExecutor, create_react_agent
 from langchain_community.chat_models import ChatOllama
@@ -27,7 +28,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # --- Config ---
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_LLM_MODEL = "llama3:latest"
+OLLAMA_LLM_MODEL = "llama3"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
@@ -72,56 +73,64 @@ def clean_df(df):
 def df_to_text(df, title=None):
     rows = [f"{title or ''}".strip()]
     for _, row in df.iterrows():
-        row_str = " | ".join(
-            f"{(col or '').strip()}: {str(val).strip()}" for col, val in row.items()
-        )
+        row_str = " | ".join(f"{(col or '').strip()}: {str(val).strip()}" for col, val in row.items())
         rows.append(row_str)
     return "\n".join(rows)
 
 def extract_scanned_table(pdf_path):
     try:
         images = convert_from_path(pdf_path)
-        stitched_tables = []
-        prev_headers = None
-        current_rows = []
-
+        all_dfs = []
         for img in images:
+            img_cv = np.array(img)
+            gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)
+            _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
             data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DATAFRAME)
             data = data.dropna(subset=["text"])
             data = data[data['conf'].astype(int) > 40]
-            grouped = data.groupby(['block_num', 'par_num', 'line_num'])
 
-            rows = []
-            for _, group in grouped:
-                line = group.sort_values("left")["text"].tolist()
-                rows.append(line)
+            # Group words into lines using y proximity
+            lines = defaultdict(list)
+            for _, row in data.iterrows():
+                y = row['top']
+                text = row['text']
+                matched_line = None
+                for key in lines:
+                    if abs(key - y) < 10:
+                        matched_line = key
+                        break
+                if matched_line is not None:
+                    lines[matched_line].append((row['left'], text))
+                else:
+                    lines[y].append((row['left'], text))
 
-            if not rows:
+            sorted_lines = []
+            for key in sorted(lines):
+                line = lines[key]
+                line.sort()  # by x position
+                words = [w[1] for w in line if w[1].strip()]
+                sorted_lines.append(words)
+
+            max_cols = max(len(l) for l in sorted_lines) if sorted_lines else 0
+            if max_cols < 2:
                 continue
 
-            max_cols = max(len(row) for row in rows)
-            padded = [row + [""] * (max_cols - len(row)) for row in rows]
-            df_raw = pd.DataFrame(padded).replace("", pd.NA).dropna(how="all").fillna("")
+            header_line = max(sorted_lines, key=lambda r: len([w for w in r if len(w) > 1]))
+            headers = [h if h.strip() else f"col{i}" for i, h in enumerate(header_line)]
 
-            header_row_idx = df_raw.apply(lambda r: r.str.len().gt(1).sum(), axis=1).idxmax()
-            headers = df_raw.iloc[header_row_idx].tolist()
-            headers = [h if h.strip() else f"col{i}" for i, h in enumerate(headers)]
+            rows = []
+            for line in sorted_lines:
+                if line == header_line or len(line) < 2:
+                    continue
+                rows.append(line)
 
-            df = df_raw.iloc[header_row_idx + 1:].reset_index(drop=True)
-            df.columns = headers
+            padded_rows = [r + [""] * (len(headers) - len(r)) for r in rows]
+            df = pd.DataFrame(padded_rows, columns=headers)
+            df = clean_df(df)
+            if not df.empty:
+                all_dfs.append(df)
 
-            if prev_headers and headers == prev_headers:
-                current_rows.append(df)
-            else:
-                if current_rows:
-                    stitched_tables.append(pd.concat(current_rows, ignore_index=True))
-                current_rows = [df]
-                prev_headers = headers
-
-        if current_rows:
-            stitched_tables.append(pd.concat(current_rows, ignore_index=True))
-
-        return stitched_tables
+        return all_dfs
     except Exception as e:
         return []
 
@@ -167,7 +176,8 @@ def extract_tables_pdf(pdf_path):
 def extract_all_tables(path, scanned):
     if scanned:
         dfs = extract_scanned_table(path)
-        return [(df, "") for df in dfs]
+        if dfs:
+            return [(df, "") for df in dfs]
     return extract_tables_pdf(path)
 
 def load_and_index(files, scanned=False):
@@ -279,6 +289,7 @@ if query := st.chat_input("Ask a question..."):
                     for doc, score in sorted(results, key=lambda x: x[1])[:5]
                 ]
                 context = "\n\n".join(top_chunks)
+
                 sub_questions = [q.strip() for q in query.replace("&", " and ").split(" and ") if q.strip()]
                 responses = []
                 llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
@@ -294,7 +305,8 @@ Question: {q}
 Answer in bullet points or structured format.
 """
                     resp = llm.invoke(prompt)
-                    responses.append(f"*Q: {q}*\n{str(resp).strip()}")
+                    responses.append(f"*Q: {q}*\n{resp.content.strip()}")
+
                 final_response = "\n\n".join(responses)
                 st.markdown(final_response)
                 st.session_state.msgs.append({"role": "assistant", "content": final_response})
