@@ -1,19 +1,17 @@
+# --- Imports ---
 import os
+import json
 import tempfile
 import shutil
 import logging
 import streamlit as st
 import pandas as pd
-import numpy as np
-from PIL import Image
 import fitz  # PyMuPDF
 import pdfplumber
 import camelot
 import pytesseract
 import requests
 from pdf2image import convert_from_path
-from fuzzywuzzy import fuzz
-
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import OllamaEmbeddings
@@ -31,248 +29,190 @@ OLLAMA_LLM_MODEL = "llama3:latest"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
-st.set_page_config(page_title="PDF QA", layout="wide")
-st.title("📄 PDF QA - Multi-page Tables + Row-Level QA")
+st.set_page_config(page_title="PDF QA with JSON Tables", layout="wide")
+st.title("📊 PDF JSON Table Extractor + QA Chat")
+
+logging.basicConfig(level=logging.INFO, filename="app.log", format="%(asctime)s [%(levelname)s] %(message)s")
 
 # --- Helpers ---
-def clean_df(df):
-    df.columns = pd.io.parsers.ParserBase({'names': df.columns})._maybe_dedup_names(df.columns)
-    return df.fillna("")
-
-def headers_match(df1, df2):
-    return df1.shape[1] == df2.shape[1] and all(
-        fuzz.ratio(a, b) > 80 for a, b in zip(df1.columns, df2.columns)
-    )
-
-def stitch_tables(dfs_with_titles):
-    stitched = []
-    last_df, last_title = None, None
-    for df, title in dfs_with_titles:
-        if last_df is not None and headers_match(last_df, df):
-            last_df = pd.concat([last_df, df], ignore_index=True)
-        else:
-            if last_df is not None:
-                stitched.append((last_df, last_title))
-            last_df, last_title = df, title
-    if last_df is not None:
-        stitched.append((last_df, last_title))
-    return stitched
-
-def extract_tables_pdfplumber(pdf_path):
-    dfs = []
+def extract_text_from_pdf(path):
     try:
-        with pdfplumber.open(pdf_path) as pdf:
-            for i, page in enumerate(pdf.pages):
-                lines = page.extract_text().splitlines() if page.extract_text() else []
-                tables = page.extract_tables()
-                for j, table in enumerate(tables):
-                    if table:
-                        df = pd.DataFrame(table[1:], columns=table[0])
-                        title = lines[lines.index(table[0][0]) - 1] if table[0][0] in lines else f"PDF Table {i+1}-{j+1}"
-                        dfs.append((clean_df(df), title.strip()))
+        doc = fitz.open(path)
+        return "\n".join([page.get_text() for page in doc])
     except Exception as e:
-        st.warning(f"pdfplumber failed: {e}")
-    return dfs
+        logging.warning(f"Text extraction failed: {e}")
+        return ""
 
-def extract_tables_camelot(pdf_path):
-    dfs = []
-    try:
-        tables = camelot.read_pdf(pdf_path, pages='all', flavor='stream')
-        for i, t in enumerate(tables):
-            if t.df.shape[0] > 1 and t.df.shape[1] > 1:
-                df = clean_df(t.df)
-                title = f"Camelot Table {i+1}"
-                dfs.append((df, title))
-    except Exception as e:
-        st.warning(f"camelot failed: {e}")
-    return dfs
+def ask_llm_for_json_tables(text):
+    prompt = f"""
+You are a table extraction expert.
 
-def extract_scanned_pdf_with_ocr(pdf_path):
-    try:
-        images = convert_from_path(pdf_path, dpi=300)
-        full_text = ""
-        for img in images:
-            text = pytesseract.image_to_string(img, lang="eng")
-            full_text += text + "\n"
+Extract all tables from the text below. Return the result as a JSON list of objects like:
 
-        if not full_text.strip():
-            return "", ""
-
-        prompt = f"""Extract all tables from this OCR text and include table titles.
-Format:
-Table Title: <title>
-<CSV>
-
-OCR Text:
-{full_text}"""
-
-        response = requests.post(
-            f"{OLLAMA_BASE_URL}/api/generate",
-            json={"model": OLLAMA_LLM_MODEL, "prompt": prompt, "stream": False},
-            timeout=120
-        )
-        result = response.json()
-        return result.get("response", "").strip(), full_text
-    except Exception as e:
-        st.error(f"OCR + LLM failed: {e}")
-        return "", ""
-
-def extract_all_tables(pdf_path, scanned_mode=False):
-    if scanned_mode:
-        return extract_scanned_pdf_with_ocr(pdf_path)
-
-    dfs = extract_tables_pdfplumber(pdf_path) + extract_tables_camelot(pdf_path)
-    stitched = stitch_tables(dfs)
-
-    try:
-        doc = fitz.open(pdf_path)
-        text = "\n".join([page.get_text() for page in doc])
-    except:
-        text = ""
-
-    prompt = f"""Extract all tables and their titles from this document.
-Format:
-Table Title: <title>
-<CSV>
+[
+  {{
+    "table_title": "optional title above the table",
+    "columns": ["col1", "col2", ...],
+    "rows": [["val1", "val2", ...], ...]
+  }}
+]
 
 Text:
-{text}"""
+{text}
+"""
 
     try:
-        response = requests.post(
+        res = requests.post(
             f"{OLLAMA_BASE_URL}/api/generate",
             json={"model": OLLAMA_LLM_MODEL, "prompt": prompt, "stream": False},
             timeout=120
         )
-        result = response.json()
-        llm_csv = result.get("response", "").strip()
-    except:
-        llm_csv = ""
+        output = res.json().get("response", "")
+        return json.loads(output)
+    except Exception as e:
+        logging.error(f"Failed to parse LLM JSON: {e}")
+        return []
 
-    chunks = []
-    for df, title in stitched:
-        st.subheader(title)
-        st.dataframe(df)
-        chunk = f"Table Title: {title}\n{df.to_csv(index=False)}"
-        chunks.append(chunk)
+def extract_from_scanned_pdf(path):
+    try:
+        images = convert_from_path(path, dpi=300)
+        text = ""
+        for img in images:
+            ocr_text = pytesseract.image_to_string(img)
+            text += ocr_text + "\n"
+        return text
+    except Exception as e:
+        logging.error(f"OCR failed: {e}")
+        return ""
 
-    if llm_csv:
-        chunks.append("LLM-Structured Tables:\n" + llm_csv)
+def extract_all_tables(path, scanned_mode=False):
+    if scanned_mode:
+        text = extract_from_scanned_pdf(path)
+    else:
+        text = extract_text_from_pdf(path)
+        try:
+            with pdfplumber.open(path) as pdf:
+                for page in pdf.pages:
+                    tables = page.extract_tables()
+                    for table in tables:
+                        if table:
+                            df = pd.DataFrame(table[1:], columns=table[0])
+                            text += "\n" + df.to_csv(index=False)
+        except:
+            pass
 
-    return "\n\n".join(chunks), text
+    table_objs = ask_llm_for_json_tables(text)
+    table_chunks = []
+    for table in table_objs:
+        title = table.get("table_title", "")
+        cols = table.get("columns", [])
+        rows = table.get("rows", [])
+        try:
+            df = pd.DataFrame(rows, columns=cols)
+            st.subheader(f"📌 {title or 'Unnamed Table'}")
+            st.dataframe(df)
+            chunk = f"Title: {title}\n\n{df.to_csv(index=False)}"
+            table_chunks.append(chunk)
+        except Exception as e:
+            logging.warning(f"Bad table skipped: {e}")
+
+    return "\n\n".join(table_chunks), text
 
 @st.cache_resource(show_spinner=False)
+def load_existing_index():
+    if not os.path.exists(DB_DIR): return None
+    try:
+        embeddings = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
+        return FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
+    except:
+        return None
+
 def load_and_index(files, scanned_mode=False):
     all_docs = []
     with tempfile.TemporaryDirectory() as td:
         for file in files:
-            path = os.path.join(td, file.name)
-            with open(path, "wb") as f:
+            file_path = os.path.join(td, file.name)
+            with open(file_path, "wb") as f:
                 f.write(file.getbuffer())
             try:
-                loader = PyPDFLoader(path)
+                loader = PyPDFLoader(file_path)
                 all_docs.extend(loader.load())
-                table_text, raw_text = extract_all_tables(path, scanned_mode)
-                all_docs.append(Document(page_content=table_text + "\n" + raw_text, metadata={"source": file.name}))
+                tables, text = extract_all_tables(file_path, scanned_mode)
+                combined = f"{tables}\n\n{text}"
+                all_docs.append(Document(page_content=combined, metadata={"source": file.name}))
             except Exception as e:
-                st.error(f"Failed to process {file.name}: {e}")
+                st.error(f"{file.name} failed: {e}")
 
     if not all_docs:
+        st.warning("No data extracted.")
         return None
 
     chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(all_docs)
-    try:
-        embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
-        vs = FAISS.from_documents(chunks, embed)
-        vs.save_local(DB_DIR)
-        st.success("✅ Indexed successfully.")
-        return vs
-    except Exception as e:
-        st.error(f"FAISS indexing error: {e}")
-        return None
+    embeddings = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
 
-def fuzzy_match_table(query, docs):
-    best_score = 0
-    best = None
-    for doc in docs:
-        for line in doc.page_content.split("\n")[:3]:
-            score = fuzz.partial_ratio(query.lower(), line.lower())
-            if score > best_score:
-                best_score = score
-                best = doc
-    return best if best_score > 70 else None
+    if os.path.exists(DB_DIR):
+        vs = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
+        vs.add_documents(chunks)
+    else:
+        vs = FAISS.from_documents(chunks, embeddings)
 
-def load_existing_index():
-    if not os.path.exists(DB_DIR):
-        return None
-    try:
-        embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
-        return FAISS.load_local(DB_DIR, embed, allow_dangerous_deserialization=True)
-    except:
-        return None
+    vs.save_local(DB_DIR)
+    st.success("✅ Indexed successfully!")
+    return vs
 
 def get_chat_chain(vs):
-    prompt = ChatPromptTemplate.from_template(
-        "You are a PDF table analysis expert.\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:"
-    )
-    llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
+    prompt = ChatPromptTemplate.from_template("You are a JSON table QA expert.\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:")
+    llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
     return {"context": vs.as_retriever(), "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
 
 def clear_db():
     if os.path.exists(DB_DIR):
         shutil.rmtree(DB_DIR)
+        st.success("🗑 FAISS index cleared.")
 
 # --- Sidebar ---
 with st.sidebar:
+    st.image("img/ACL_Digital.png", width=180)
+    st.image("img/Cipla_Foundation.png", width=180)
+    st.markdown("---")
     st.header("📂 Upload PDFs")
-    uploaded = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
-    scanned_mode = st.checkbox("📸 Is Scanned PDF?")
-    run = st.button("📊 Extract & Index")
+    uploaded = st.file_uploader("Upload PDF(s)", type="pdf", accept_multiple_files=True, key="upload_key")
+    scanned_mode = st.checkbox("📸 PDF is scanned?")
+    if st.button("📊 Extract & Index"):
+        if uploaded:
+            st.session_state.msgs = []
+            with st.spinner("Processing and indexing..."):
+                st.session_state.vs = load_and_index(uploaded, scanned_mode)
+            st.session_state["upload_key"] = None  # clear file list from sidebar
 
     st.markdown("---")
     if st.button("🗑 Clear DB"):
         clear_db()
         st.session_state.vs = None
-        st.success("Database cleared.")
     if st.button("🧹 Clear Chat"):
         st.session_state.msgs = []
-        st.success("Chat cleared.")
 
-# --- State Init ---
+# --- Main Chat ---
 if "vs" not in st.session_state:
     st.session_state.vs = load_existing_index()
 if "msgs" not in st.session_state:
     st.session_state.msgs = []
 
-# --- Upload Trigger ---
-if run and uploaded:
-    st.session_state.msgs = []
-    with st.spinner("Processing..."):
-        st.session_state.vs = load_and_index(uploaded, scanned_mode)
-    if st.session_state.vs:
-        st.session_state.msgs.append({"role": "assistant", "content": "✅ You can now query tables by name or row values!"})
-
-# --- Chat Loop ---
 for msg in st.session_state.msgs:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if query := st.chat_input("Ask about the tables or rows..."):
+if query := st.chat_input("Ask about tables or data..."):
     st.session_state.msgs.append({"role": "user", "content": query})
     with st.chat_message("user"):
         st.markdown(query)
 
     if st.session_state.vs:
-        chunks = st.session_state.vs.similarity_search(query, k=8)
-        table_doc = fuzzy_match_table(query, chunks)
-
-        context = table_doc.page_content if table_doc else "\n\n".join([doc.page_content for doc in chunks[:3]])
-
         chain = get_chat_chain(st.session_state.vs)
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                resp = chain.invoke({"question": query, "context": context})
-                st.markdown(resp)
-                st.session_state.msgs.append({"role": "assistant", "content": resp})
+                answer = "".join(chain.stream(query))
+                st.markdown(answer)
+                st.session_state.msgs.append({"role": "assistant", "content": answer})
     else:
-        st.error("Please upload and process PDFs first.")
+        st.error("Please upload and index documents first.")
