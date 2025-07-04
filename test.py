@@ -1,3 +1,4 @@
+# --- Imports ---
 import os
 import tempfile
 import shutil
@@ -13,11 +14,8 @@ import pytesseract
 from pdf2image import convert_from_path
 from fuzzywuzzy import fuzz
 
-from langchain.agents import Tool, AgentExecutor, create_react_agent
 from langchain_community.chat_models import ChatOllama
 from langchain_core.prompts import PromptTemplate
-from langchain.tools.python import PythonREPLTool
-# from langchain.tools.python.tool import PythonREPLTool
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
@@ -30,8 +28,8 @@ OLLAMA_LLM_MODEL = "llama4:latest"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
-st.set_page_config(page_title="PDF QA + Table Agent", layout="wide")
-st.title("📄 PDF QA with Table Matching + Pandas Agent")
+st.set_page_config(page_title="PDF QA with LLaMA4", layout="wide")
+st.title("📄 PDF QA using LLaMA4")
 
 # --- Session State ---
 if "vs" not in st.session_state:
@@ -200,24 +198,6 @@ def fuzzy_match_table(query):
             best_table = table
     return best_table if best_score >= 70 else None
 
-def run_pandas_agent(df, user_query):
-    llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
-    tool = Tool(name="pandas_agent", description="Execute Python code to analyze a table", func=PythonREPLTool().run)
-    prompt = PromptTemplate.from_template("""
-You are a pandas expert working with a table loaded as df.
-Answer the user's question using Python.
-
-Question: {input}
-""")
-    agent = create_react_agent(llm, tools=[tool], prompt=prompt)
-    executor = AgentExecutor(agent=agent, tools=[tool], verbose=False)
-    context = f"import pandas as pd\ndf = pd.DataFrame({df.to_dict(orient='list')})"
-    try:
-        result = executor.invoke({"input": f"{context}\n\n{user_query}"})
-        return result["output"]
-    except Exception as e:
-        return f"Agent error: {e}"
-
 # --- Sidebar UI ---
 st.sidebar.header("\U0001F4C2 Upload PDFs")
 uploaded = st.sidebar.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True, key=st.session_state.uploader_key)
@@ -253,9 +233,12 @@ if query := st.chat_input("Ask a question..."):
     if table:
         with st.chat_message("assistant"):
             with st.spinner(f"Using table: {table['table_title']}"):
-                result = run_pandas_agent(table["data"], query)
-                st.markdown(f"*Matched Table:* {table['table_title']}\n\n{result}")
-                st.session_state.msgs.append({"role": "assistant", "content": result})
+                table_text = df_to_text(table["data"], table["table_title"])
+                prompt = f"You are a helpful assistant. Below is a table:\n\n{table_text}\n\nAnswer the following question:\n{query}"
+                llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
+                response = llm.invoke(prompt)
+                st.markdown(f"*Matched Table:* {table['table_title']}\n\n{response}")
+                st.session_state.msgs.append({"role": "assistant", "content": response})
     elif st.session_state.vs:
         with st.chat_message("assistant"):
             with st.spinner("Searching documents..."):
