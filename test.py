@@ -70,9 +70,16 @@ def clean_df(df):
     return df.fillna("")
 
 def df_to_text(df, title=None):
-    rows = [f"{title or ''}".strip()]
+    """
+    Convert DataFrame to readable text format.
+    Handles None and missing values gracefully.
+    """
+    rows = [title.strip() if isinstance(title, str) else ""]
     for _, row in df.iterrows():
-        row_str = " | ".join(f"{col.strip()}: {str(val).strip()}" for col, val in row.items())
+        row_str = " | ".join(
+            f"{str(col).strip() if col is not None else ''}: {str(val).strip() if val is not None else ''}"
+            for col, val in row.items()
+        )
         rows.append(row_str)
     return "\n".join(rows)
 
