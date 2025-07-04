@@ -2,14 +2,11 @@
 import os
 import shutil
 import tempfile
-import logging
-from collections import defaultdict
-
 import streamlit as st
 import pandas as pd
 import numpy as np
+import fitz  # PyMuPDF
 from PIL import Image
-import fitz  # <-- make sure this is from PyMuPDF
 import pytesseract
 from pdf2image import convert_from_path
 from fuzzywuzzy import fuzz
@@ -31,8 +28,8 @@ OLLAMA_LLM_MODEL = "llama3"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
-st.set_page_config(page_title="PDF QA with Table Matching", layout="wide")
-st.title("📄 PDF QA with Table Matching")
+st.set_page_config(page_title="PDF QA (Scanned + Text)", layout="wide")
+st.title("📄 PDF QA - Scanned & Text PDFs")
 
 # --- Session State ---
 if "vs" not in st.session_state:
@@ -44,36 +41,17 @@ if "msgs" not in st.session_state:
 if "tables" not in st.session_state:
     st.session_state.tables = []
 
-# --- Style ---
-st.markdown("""
-<style>
-section[data-testid="stSidebar"] {
-    background-color: white;
-    border-right: 1px solid #ccc;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# --- Helpers ---
-def df_to_text(df, title=None):
-    lines = [f"{title or ''}".strip()] if title else []
-    for _, row in df.iterrows():
-        row_str = " | ".join(f"{(col or '').strip()}: {str(val).strip()}" for col, val in row.items())
-        lines.append(row_str)
-    return "\n".join(lines)
-
+# --- OCR Table Extraction ---
 def extract_tables_scanned_ocr(pdf_path, show_debug=False):
     try:
         images = convert_from_path(pdf_path, dpi=300)
         all_tables = []
 
         for page_num, image in enumerate(images):
-            # Get detailed OCR output
             ocr_df = pytesseract.image_to_data(image, output_type=pytesseract.Output.DATAFRAME)
             ocr_df = ocr_df[(ocr_df.conf != -1) & (ocr_df.text.str.strip() != "")]
             ocr_df = ocr_df.reset_index(drop=True)
 
-            # Group words into rows based on vertical alignment
             lines = []
             current_line = []
             prev_y = None
@@ -88,18 +66,15 @@ def extract_tables_scanned_ocr(pdf_path, show_debug=False):
             if current_line:
                 lines.append(current_line)
 
-            # Convert lines into table
             rows = []
             for line in lines:
                 sorted_line = sorted(line, key=lambda r: r['left'])
                 rows.append([r['text'] for r in sorted_line])
 
-            # Convert to DataFrame
             max_cols = max(len(row) for row in rows)
             table = [row + [""] * (max_cols - len(row)) for row in rows]
             df = pd.DataFrame(table)
 
-            # Simple header detection
             header_idx = df.apply(lambda r: r.str.len().gt(1).sum(), axis=1).idxmax()
             headers = df.iloc[header_idx].fillna("").tolist()
             df_data = df.iloc[header_idx + 1:].reset_index(drop=True)
@@ -107,7 +82,6 @@ def extract_tables_scanned_ocr(pdf_path, show_debug=False):
 
             all_tables.append(df_data)
 
-            # Optional: show overlay
             if show_debug:
                 fig, ax = plt.subplots()
                 ax.imshow(image)
@@ -115,22 +89,23 @@ def extract_tables_scanned_ocr(pdf_path, show_debug=False):
                     x, y, w, h = row['left'], row['top'], row['width'], row['height']
                     ax.add_patch(plt.Rectangle((x, y), w, h, edgecolor='red', fill=False, linewidth=1))
                     ax.text(x, y - 2, row['text'], fontsize=5, color='blue')
-                ax.set_title(f"OCR Debug View - Page {page_num+1}")
+                ax.set_title(f"OCR Debug - Page {page_num + 1}")
                 st.pyplot(fig)
 
         return [(df, "") for df in all_tables]
     except Exception as e:
-        st.error(f"❌ Scanned table extraction failed: {e}")
+        st.error(f"❌ OCR failed: {e}")
         return []
-    
+
+# --- Text Extraction ---
 def extract_tables_text(pdf_path):
     results = []
     try:
-        doc = fitz.open(pdf_path)  # ✅ Will now work after uninstalling wrong fitz
+        doc = fitz.open(pdf_path)
         full_text = "\n".join([page.get_text() for page in doc])
         results.append(Document(page_content=full_text, metadata={"source": os.path.basename(pdf_path)}))
     except Exception as e:
-        st.warning(f"Failed to extract text: {e}")
+        st.warning(f"⚠ Text extraction failed: {e}")
     return results
 
 def extract_all_tables(path, scanned=False, show_debug=False):
@@ -138,33 +113,13 @@ def extract_all_tables(path, scanned=False, show_debug=False):
         return extract_tables_scanned_ocr(path, show_debug)
     return []
 
-def load_and_index(files, scanned=False, show_debug=False):
-    embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
-    docs = []
-    tables = []
-
-    with tempfile.TemporaryDirectory() as td:
-        for f in files:
-            path = os.path.join(td, f.name)
-            with open(path, "wb") as out:
-                out.write(f.getbuffer())
-
-            table_blocks = extract_all_tables(path, scanned, show_debug)
-            for df, title in table_blocks:
-                text = df_to_text(df, title)
-                docs.append(Document(page_content=text, metadata={"source": f.name, "table_title": title}))
-                tables.append({"data": df, "table_title": title, "source": f.name})
-
-            docs += extract_tables_text(path)
-
-    chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(docs)
-    if chunks:
-        if st.session_state.vs:
-            st.session_state.vs.add_documents(chunks)
-        else:
-            st.session_state.vs = FAISS.from_documents(chunks, embed)
-        st.session_state.vs.save_local(DB_DIR)
-    st.session_state.tables.extend(tables)
+# --- Helper Functions ---
+def df_to_text(df, title=None):
+    lines = [f"{title or ''}".strip()] if title else []
+    for _, row in df.iterrows():
+        row_str = " | ".join(f"{col.strip()}: {str(val).strip()}" for col, val in row.items())
+        lines.append(row_str)
+    return "\n".join(lines)
 
 def fuzzy_match_table(query):
     best_score = 0
@@ -195,7 +150,35 @@ Question: {input}
     except Exception as e:
         return f"Agent error: {e}"
 
-# --- Sidebar UI ---
+def load_and_index(files, scanned=False, show_debug=False):
+    embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
+    docs = []
+    tables = []
+
+    with tempfile.TemporaryDirectory() as td:
+        for f in files:
+            path = os.path.join(td, f.name)
+            with open(path, "wb") as out:
+                out.write(f.getbuffer())
+
+            table_blocks = extract_all_tables(path, scanned, show_debug)
+            for df, title in table_blocks:
+                text = df_to_text(df, title)
+                docs.append(Document(page_content=text, metadata={"source": f.name, "table_title": title}))
+                tables.append({"data": df, "table_title": title, "source": f.name})
+
+            docs += extract_tables_text(path)
+
+    chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(docs)
+    if chunks:
+        if st.session_state.vs:
+            st.session_state.vs.add_documents(chunks)
+        else:
+            st.session_state.vs = FAISS.from_documents(chunks, embed)
+        st.session_state.vs.save_local(DB_DIR)
+    st.session_state.tables.extend(tables)
+
+# --- UI Sidebar ---
 st.sidebar.header("📂 Upload PDFs")
 uploaded = st.sidebar.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True, key=st.session_state.uploader_key)
 scanned_mode = st.sidebar.checkbox("📸 Is Scanned PDF?", value=False)
@@ -207,7 +190,7 @@ if st.sidebar.button("📊 Extract & Index"):
             load_and_index(uploaded, scanned=scanned_mode, show_debug=show_debug)
             st.success("✅ Documents indexed!")
             st.session_state.uploader_key += 1
-            st.session_state.msgs = [{"role": "assistant", "content": "✅ Ask about any table or row!"}]
+            st.session_state.msgs = [{"role": "assistant", "content": "✅ Ask about any table or data!"}]
 
 if st.sidebar.button("🧹 Clear Chat"):
     st.session_state.msgs = []
@@ -255,7 +238,6 @@ Answer in bullet points or structured format.
 """
                 response = llm.invoke(prompt)
                 response_text = response.content.strip() if hasattr(response, "content") else str(response).strip()
-
                 st.markdown(response_text)
                 st.session_state.msgs.append({"role": "assistant", "content": response_text})
     else:

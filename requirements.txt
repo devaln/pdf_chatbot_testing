@@ -1,20 +1,18 @@
-streamlit
+streamlit>=1.30.0
+pandas
+numpy
 pytesseract
 pdf2image
 pdfplumber
-fitz  # from PyMuPDF
+PyMuPDF
 camelot-py[cv]
-PyPDF2
-pandas
-numpy
-layoutparser
-python-Levenshtein
-fuzzywuzzy
 Pillow
-faiss-cpu
+requests
+fuzzywuzzy
+matplotlib
+
+# LangChain + Ollama
 langchain
 langchain-community
 langchain-core
 langchain-experimental
-llama-index
-matplotlib
