@@ -64,62 +64,65 @@ def df_to_text(df, title=None):
 
 def extract_tables_scanned_ocr(pdf_path, show_debug=False):
     try:
-        images = convert_from_path(pdf_path)
+        images = convert_from_path(pdf_path, dpi=300)
         all_tables = []
 
         for page_num, image in enumerate(images):
-            ocr_data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DATAFRAME)
-            ocr_data = ocr_data[ocr_data.conf != -1].dropna(subset=['text'])
-            ocr_data = ocr_data[ocr_data.text.str.strip().astype(bool)]
+            # Get detailed OCR output
+            ocr_df = pytesseract.image_to_data(image, output_type=pytesseract.Output.DATAFRAME)
+            ocr_df = ocr_df[(ocr_df.conf != -1) & (ocr_df.text.str.strip() != "")]
+            ocr_df = ocr_df.reset_index(drop=True)
 
+            # Group words into rows based on vertical alignment
             lines = []
             current_line = []
-            last_y = None
-
-            for _, row in ocr_data.iterrows():
-                if last_y is None or abs(row['top'] - last_y) <= 10:
+            prev_y = None
+            for _, row in ocr_df.iterrows():
+                y = row['top']
+                if prev_y is None or abs(y - prev_y) <= 10:
                     current_line.append(row)
                 else:
                     lines.append(current_line)
                     current_line = [row]
-                last_y = row['top']
+                prev_y = y
             if current_line:
                 lines.append(current_line)
 
-            table_rows = []
+            # Convert lines into table
+            rows = []
             for line in lines:
                 sorted_line = sorted(line, key=lambda r: r['left'])
-                table_rows.append([r['text'] for r in sorted_line])
+                rows.append([r['text'] for r in sorted_line])
 
-            if not table_rows:
-                continue
+            # Convert to DataFrame
+            max_cols = max(len(row) for row in rows)
+            table = [row + [""] * (max_cols - len(row)) for row in rows]
+            df = pd.DataFrame(table)
 
-            max_cols = max(len(r) for r in table_rows)
-            padded = [r + [""] * (max_cols - len(r)) for r in table_rows]
-            df = pd.DataFrame(padded)
-
-            header_idx = df.apply(lambda r: r.str.len().gt(2).sum(), axis=1).idxmax()
-            headers = df.iloc[header_idx].tolist()
-            headers = [h if h.strip() else f"col{i}" for i, h in enumerate(headers)]
+            # Simple header detection
+            header_idx = df.apply(lambda r: r.str.len().gt(1).sum(), axis=1).idxmax()
+            headers = df.iloc[header_idx].fillna("").tolist()
             df_data = df.iloc[header_idx + 1:].reset_index(drop=True)
-            df_data.columns = headers
+            df_data.columns = [h if h else f"col{i}" for i, h in enumerate(headers)]
+
             all_tables.append(df_data)
 
+            # Optional: show overlay
             if show_debug:
                 fig, ax = plt.subplots()
                 ax.imshow(image)
-                for _, row in ocr_data.iterrows():
+                for _, row in ocr_df.iterrows():
                     x, y, w, h = row['left'], row['top'], row['width'], row['height']
                     ax.add_patch(plt.Rectangle((x, y), w, h, edgecolor='red', fill=False, linewidth=1))
                     ax.text(x, y - 2, row['text'], fontsize=5, color='blue')
-                ax.set_title(f"OCR Overlay - Page {page_num+1}")
+                ax.set_title(f"OCR Debug View - Page {page_num+1}")
                 st.pyplot(fig)
 
         return [(df, "") for df in all_tables]
     except Exception as e:
-        st.error(f"OCR table extraction failed: {e}")
+        st.error(f"❌ Scanned table extraction failed: {e}")
         return []
-
+    
 def extract_tables_text(pdf_path):
     results = []
     try:
