@@ -52,18 +52,31 @@ def clean_df(df):
     return df.fillna("")
 
 def extract_tables_pdfplumber(pdf_path):
-    dfs = []
+    table_blocks = []
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
                 tables = page.extract_tables()
+                page_text_lines = page.extract_text().split("\n") if page.extract_text() else []
+
                 for table in tables:
                     if table:
                         df = pd.DataFrame(table[1:], columns=table[0])
-                        dfs.append(clean_df(df))
+                        df = clean_df(df)
+
+                        # Try to find table title from line above header
+                        title = ""
+                        for i, line in enumerate(page_text_lines):
+                            if all(col.strip() in line for col in table[0] if col):
+                                if i > 0:
+                                    title = page_text_lines[i - 1].strip()
+                                break
+
+                        block_text = f"Table Title: {title}\n{df.to_csv(index=False)}"
+                        table_blocks.append(block_text)
     except Exception as e:
         logging.warning(f"pdfplumber failed: {e}")
-    return dfs
+    return table_blocks
 
 def extract_tables_camelot(pdf_path):
     dfs = []
@@ -135,10 +148,9 @@ def extract_all_tables(pdf_path, scanned_mode=False):
     except Exception as e:
         logging.error(f"Text extraction failed: {e}")
 
-    all_tables = [df.to_csv(index=False) for df in dfs]
-    return "\n\n".join(all_tables), full_text
+    return "\n\n".join(dfs), full_text  # dfs contains string blocks with table title + CSV
 
-@st.cache_resource(show_spinner=False)
+# 🚫 Removed caching decorator to avoid FAISS pickle error
 def load_and_index(files, scanned_mode=False):
     all_docs = []
     with tempfile.TemporaryDirectory() as td:
@@ -161,7 +173,6 @@ def load_and_index(files, scanned_mode=False):
     chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(all_docs)
     embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
 
-    # Load or Create FAISS Index
     if os.path.exists(os.path.join(DB_DIR, "index.faiss")):
         vs = FAISS.load_local(DB_DIR, embed)
         vs.add_documents(chunks)
