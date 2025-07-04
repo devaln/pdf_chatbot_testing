@@ -1,244 +1,278 @@
-# --- Imports ---
 import os
-import shutil
 import tempfile
+import shutil
+import logging
 import streamlit as st
 import pandas as pd
 import numpy as np
-import fitz  # PyMuPDF
 from PIL import Image
+import fitz  # PyMuPDF
+import pdfplumber
+import camelot
 import pytesseract
+import requests
 from pdf2image import convert_from_path
 from fuzzywuzzy import fuzz
-import matplotlib.pyplot as plt
 
-from langchain.agents import Tool, AgentExecutor, create_react_agent
-from langchain_community.chat_models import ChatOllama
-from langchain_core.prompts import PromptTemplate
-from langchain_experimental.tools.python.tool import PythonREPLTool
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_community.chat_models import ChatOllama
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.runnables import RunnablePassthrough
 
 # --- Config ---
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_LLM_MODEL = "llama3"
+OLLAMA_LLM_MODEL = "llama3:latest"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
-st.set_page_config(page_title="PDF QA (Scanned + Text)", layout="wide")
-st.title("📄 PDF QA - Scanned & Text PDFs")
+st.set_page_config(page_title="PDF QA", layout="wide")
+st.title("📄 PDF QA - Multi-page Tables + Row-Level QA")
 
-# --- Session State ---
-if "vs" not in st.session_state:
-    st.session_state.vs = None
-if "uploader_key" not in st.session_state:
-    st.session_state.uploader_key = 0
-if "msgs" not in st.session_state:
-    st.session_state.msgs = []
-if "tables" not in st.session_state:
-    st.session_state.tables = []
+# --- Helpers ---
+def clean_df(df):
+    df.columns = pd.io.parsers.ParserBase({'names': df.columns})._maybe_dedup_names(df.columns)
+    return df.fillna("")
 
-# --- OCR Table Extraction ---
-def extract_tables_scanned_ocr(pdf_path, show_debug=False):
+def headers_match(df1, df2):
+    return df1.shape[1] == df2.shape[1] and all(
+        fuzz.ratio(a, b) > 80 for a, b in zip(df1.columns, df2.columns)
+    )
+
+def stitch_tables(dfs_with_titles):
+    stitched = []
+    last_df, last_title = None, None
+    for df, title in dfs_with_titles:
+        if last_df is not None and headers_match(last_df, df):
+            last_df = pd.concat([last_df, df], ignore_index=True)
+        else:
+            if last_df is not None:
+                stitched.append((last_df, last_title))
+            last_df, last_title = df, title
+    if last_df is not None:
+        stitched.append((last_df, last_title))
+    return stitched
+
+def extract_tables_pdfplumber(pdf_path):
+    dfs = []
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for i, page in enumerate(pdf.pages):
+                lines = page.extract_text().splitlines() if page.extract_text() else []
+                tables = page.extract_tables()
+                for j, table in enumerate(tables):
+                    if table:
+                        df = pd.DataFrame(table[1:], columns=table[0])
+                        title = lines[lines.index(table[0][0]) - 1] if table[0][0] in lines else f"PDF Table {i+1}-{j+1}"
+                        dfs.append((clean_df(df), title.strip()))
+    except Exception as e:
+        st.warning(f"pdfplumber failed: {e}")
+    return dfs
+
+def extract_tables_camelot(pdf_path):
+    dfs = []
+    try:
+        tables = camelot.read_pdf(pdf_path, pages='all', flavor='stream')
+        for i, t in enumerate(tables):
+            if t.df.shape[0] > 1 and t.df.shape[1] > 1:
+                df = clean_df(t.df)
+                title = f"Camelot Table {i+1}"
+                dfs.append((df, title))
+    except Exception as e:
+        st.warning(f"camelot failed: {e}")
+    return dfs
+
+def extract_scanned_pdf_with_ocr(pdf_path):
     try:
         images = convert_from_path(pdf_path, dpi=300)
-        all_tables = []
+        full_text = ""
+        for img in images:
+            text = pytesseract.image_to_string(img, lang="eng")
+            full_text += text + "\n"
 
-        for page_num, image in enumerate(images):
-            ocr_df = pytesseract.image_to_data(image, output_type=pytesseract.Output.DATAFRAME)
-            ocr_df = ocr_df[(ocr_df.conf != -1) & (ocr_df.text.str.strip() != "")]
-            ocr_df = ocr_df.reset_index(drop=True)
+        if not full_text.strip():
+            return "", ""
 
-            lines = []
-            current_line = []
-            prev_y = None
-            for _, row in ocr_df.iterrows():
-                y = row['top']
-                if prev_y is None or abs(y - prev_y) <= 10:
-                    current_line.append(row)
-                else:
-                    lines.append(current_line)
-                    current_line = [row]
-                prev_y = y
-            if current_line:
-                lines.append(current_line)
+        prompt = f"""Extract all tables from this OCR text and include table titles.
+Format:
+Table Title: <title>
+<CSV>
 
-            rows = []
-            for line in lines:
-                sorted_line = sorted(line, key=lambda r: r['left'])
-                rows.append([r['text'] for r in sorted_line])
+OCR Text:
+{full_text}"""
 
-            max_cols = max(len(row) for row in rows)
-            table = [row + [""] * (max_cols - len(row)) for row in rows]
-            df = pd.DataFrame(table)
-
-            header_idx = df.apply(lambda r: r.str.len().gt(1).sum(), axis=1).idxmax()
-            headers = df.iloc[header_idx].fillna("").tolist()
-            df_data = df.iloc[header_idx + 1:].reset_index(drop=True)
-            df_data.columns = [h if h else f"col{i}" for i, h in enumerate(headers)]
-
-            all_tables.append(df_data)
-
-            if show_debug:
-                fig, ax = plt.subplots()
-                ax.imshow(image)
-                for _, row in ocr_df.iterrows():
-                    x, y, w, h = row['left'], row['top'], row['width'], row['height']
-                    ax.add_patch(plt.Rectangle((x, y), w, h, edgecolor='red', fill=False, linewidth=1))
-                    ax.text(x, y - 2, row['text'], fontsize=5, color='blue')
-                ax.set_title(f"OCR Debug - Page {page_num + 1}")
-                st.pyplot(fig)
-
-        return [(df, "") for df in all_tables]
+        response = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={"model": OLLAMA_LLM_MODEL, "prompt": prompt, "stream": False},
+            timeout=120
+        )
+        result = response.json()
+        return result.get("response", "").strip(), full_text
     except Exception as e:
-        st.error(f"❌ OCR failed: {e}")
-        return []
+        st.error(f"OCR + LLM failed: {e}")
+        return "", ""
 
-# --- Text Extraction ---
-def extract_tables_text(pdf_path):
-    results = []
+def extract_all_tables(pdf_path, scanned_mode=False):
+    if scanned_mode:
+        return extract_scanned_pdf_with_ocr(pdf_path)
+
+    dfs = extract_tables_pdfplumber(pdf_path) + extract_tables_camelot(pdf_path)
+    stitched = stitch_tables(dfs)
+
     try:
         doc = fitz.open(pdf_path)
-        full_text = "\n".join([page.get_text() for page in doc])
-        results.append(Document(page_content=full_text, metadata={"source": os.path.basename(pdf_path)}))
-    except Exception as e:
-        st.warning(f"⚠ Text extraction failed: {e}")
-    return results
+        text = "\n".join([page.get_text() for page in doc])
+    except:
+        text = ""
 
-def extract_all_tables(path, scanned=False, show_debug=False):
-    if scanned:
-        return extract_tables_scanned_ocr(path, show_debug)
-    return []
+    prompt = f"""Extract all tables and their titles from this document.
+Format:
+Table Title: <title>
+<CSV>
 
-# --- Helper Functions ---
-def df_to_text(df, title=None):
-    lines = [f"{title or ''}".strip()] if title else []
-    for _, row in df.iterrows():
-        row_str = " | ".join(f"{col.strip()}: {str(val).strip()}" for col, val in row.items())
-        lines.append(row_str)
-    return "\n".join(lines)
+Text:
+{text}"""
 
-def fuzzy_match_table(query):
-    best_score = 0
-    best_table = None
-    for table in st.session_state.tables:
-        score = fuzz.partial_ratio(query.lower(), table["table_title"].lower())
-        if score > best_score:
-            best_score = score
-            best_table = table
-    return best_table if best_score >= 70 else None
-
-def run_pandas_agent(df, user_query):
-    llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
-    tool = Tool(name="pandas_agent", description="Executes Python code to analyze a table", func=PythonREPLTool().run)
-    prompt = PromptTemplate.from_template("""
-You are a pandas expert working with a DataFrame df.
-Answer the user's question using Python code only.
-
-Question: {input}
-""")
-    agent = create_react_agent(llm, tools=[tool], prompt=prompt)
-    executor = AgentExecutor(agent=agent, tools=[tool], verbose=False)
-
-    context = f"import pandas as pd\ndf = pd.DataFrame({df.to_dict(orient='list')})"
     try:
-        result = executor.invoke({"input": f"{context}\n\n{user_query}"})
-        return result["output"]
-    except Exception as e:
-        return f"Agent error: {e}"
+        response = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={"model": OLLAMA_LLM_MODEL, "prompt": prompt, "stream": False},
+            timeout=120
+        )
+        result = response.json()
+        llm_csv = result.get("response", "").strip()
+    except:
+        llm_csv = ""
 
-def load_and_index(files, scanned=False, show_debug=False):
-    embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
-    docs = []
-    tables = []
+    chunks = []
+    for df, title in stitched:
+        st.subheader(title)
+        st.dataframe(df)
+        chunk = f"Table Title: {title}\n{df.to_csv(index=False)}"
+        chunks.append(chunk)
 
+    if llm_csv:
+        chunks.append("LLM-Structured Tables:\n" + llm_csv)
+
+    return "\n\n".join(chunks), text
+
+@st.cache_resource(show_spinner=False)
+def load_and_index(files, scanned_mode=False):
+    all_docs = []
     with tempfile.TemporaryDirectory() as td:
-        for f in files:
-            path = os.path.join(td, f.name)
-            with open(path, "wb") as out:
-                out.write(f.getbuffer())
+        for file in files:
+            path = os.path.join(td, file.name)
+            with open(path, "wb") as f:
+                f.write(file.getbuffer())
+            try:
+                loader = PyPDFLoader(path)
+                all_docs.extend(loader.load())
+                table_text, raw_text = extract_all_tables(path, scanned_mode)
+                all_docs.append(Document(page_content=table_text + "\n" + raw_text, metadata={"source": file.name}))
+            except Exception as e:
+                st.error(f"Failed to process {file.name}: {e}")
 
-            table_blocks = extract_all_tables(path, scanned, show_debug)
-            for df, title in table_blocks:
-                text = df_to_text(df, title)
-                docs.append(Document(page_content=text, metadata={"source": f.name, "table_title": title}))
-                tables.append({"data": df, "table_title": title, "source": f.name})
+    if not all_docs:
+        return None
 
-            docs += extract_tables_text(path)
+    chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(all_docs)
+    try:
+        embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
+        vs = FAISS.from_documents(chunks, embed)
+        vs.save_local(DB_DIR)
+        st.success("✅ Indexed successfully.")
+        return vs
+    except Exception as e:
+        st.error(f"FAISS indexing error: {e}")
+        return None
 
-    chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(docs)
-    if chunks:
-        if st.session_state.vs:
-            st.session_state.vs.add_documents(chunks)
-        else:
-            st.session_state.vs = FAISS.from_documents(chunks, embed)
-        st.session_state.vs.save_local(DB_DIR)
-    st.session_state.tables.extend(tables)
+def fuzzy_match_table(query, docs):
+    best_score = 0
+    best = None
+    for doc in docs:
+        for line in doc.page_content.split("\n")[:3]:
+            score = fuzz.partial_ratio(query.lower(), line.lower())
+            if score > best_score:
+                best_score = score
+                best = doc
+    return best if best_score > 70 else None
 
-# --- UI Sidebar ---
-st.sidebar.header("📂 Upload PDFs")
-uploaded = st.sidebar.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True, key=st.session_state.uploader_key)
-scanned_mode = st.sidebar.checkbox("📸 Is Scanned PDF?", value=False)
-show_debug = st.sidebar.checkbox("🪟 Show OCR Debug View", value=False)
+def load_existing_index():
+    if not os.path.exists(DB_DIR):
+        return None
+    try:
+        embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
+        return FAISS.load_local(DB_DIR, embed, allow_dangerous_deserialization=True)
+    except:
+        return None
 
-if st.sidebar.button("📊 Extract & Index"):
-    if uploaded:
-        with st.spinner("Indexing documents..."):
-            load_and_index(uploaded, scanned=scanned_mode, show_debug=show_debug)
-            st.success("✅ Documents indexed!")
-            st.session_state.uploader_key += 1
-            st.session_state.msgs = [{"role": "assistant", "content": "✅ Ask about any table or data!"}]
+def get_chat_chain(vs):
+    prompt = ChatPromptTemplate.from_template(
+        "You are a PDF table analysis expert.\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:"
+    )
+    llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
+    return {"context": vs.as_retriever(), "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
 
-if st.sidebar.button("🧹 Clear Chat"):
+def clear_db():
+    if os.path.exists(DB_DIR):
+        shutil.rmtree(DB_DIR)
+
+# --- Sidebar ---
+with st.sidebar:
+    st.header("📂 Upload PDFs")
+    uploaded = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
+    scanned_mode = st.checkbox("📸 Is Scanned PDF?")
+    run = st.button("📊 Extract & Index")
+
+    st.markdown("---")
+    if st.button("🗑 Clear DB"):
+        clear_db()
+        st.session_state.vs = None
+        st.success("Database cleared.")
+    if st.button("🧹 Clear Chat"):
+        st.session_state.msgs = []
+        st.success("Chat cleared.")
+
+# --- State Init ---
+if "vs" not in st.session_state:
+    st.session_state.vs = load_existing_index()
+if "msgs" not in st.session_state:
     st.session_state.msgs = []
 
-if st.sidebar.button("🗑 Clear DB"):
-    shutil.rmtree(DB_DIR, ignore_errors=True)
-    st.session_state.vs = None
-    st.session_state.tables = []
-    st.success("Database cleared.")
+# --- Upload Trigger ---
+if run and uploaded:
+    st.session_state.msgs = []
+    with st.spinner("Processing..."):
+        st.session_state.vs = load_and_index(uploaded, scanned_mode)
+    if st.session_state.vs:
+        st.session_state.msgs.append({"role": "assistant", "content": "✅ You can now query tables by name or row values!"})
 
 # --- Chat Loop ---
 for msg in st.session_state.msgs:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if query := st.chat_input("Ask a question..."):
+if query := st.chat_input("Ask about the tables or rows..."):
     st.session_state.msgs.append({"role": "user", "content": query})
     with st.chat_message("user"):
         st.markdown(query)
 
-    table = fuzzy_match_table(query)
-    if table:
+    if st.session_state.vs:
+        chunks = st.session_state.vs.similarity_search(query, k=8)
+        table_doc = fuzzy_match_table(query, chunks)
+
+        context = table_doc.page_content if table_doc else "\n\n".join([doc.page_content for doc in chunks[:3]])
+
+        chain = get_chat_chain(st.session_state.vs)
         with st.chat_message("assistant"):
-            with st.spinner(f"Using table: {table['table_title']}"):
-                result = run_pandas_agent(table["data"], query)
-                st.markdown(f"*Matched Table:* {table['table_title']}\n\n{result}")
-                st.session_state.msgs.append({"role": "assistant", "content": result})
-    elif st.session_state.vs:
-        with st.chat_message("assistant"):
-            with st.spinner("Searching documents..."):
-                results = st.session_state.vs.similarity_search_with_score(query, k=6)
-                top_chunks = [f"[Source: {doc.metadata.get('source', 'unknown')}]\n{doc.page_content}" for doc, _ in results[:3]]
-                context = "\n\n".join(top_chunks)
-
-                llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
-                prompt = f"""
-You are an expert assistant. Use ONLY the context below to answer the question.
-If the answer is not present, say "Not found in the provided documents."
-
-Context:
-{context}
-
-Question: {query}
-Answer in bullet points or structured format.
-"""
-                response = llm.invoke(prompt)
-                response_text = response.content.strip() if hasattr(response, "content") else str(response).strip()
-                st.markdown(response_text)
-                st.session_state.msgs.append({"role": "assistant", "content": response_text})
+            with st.spinner("Thinking..."):
+                resp = chain.invoke({"question": query, "context": context})
+                st.markdown(resp)
+                st.session_state.msgs.append({"role": "assistant", "content": resp})
     else:
-        st.error("⚠ Please upload and index files first.")
+        st.error("Please upload and process PDFs first.")
