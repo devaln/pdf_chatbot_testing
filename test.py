@@ -2,6 +2,7 @@
 import os
 import tempfile
 import shutil
+import logging
 from collections import defaultdict
 import streamlit as st
 import pandas as pd
@@ -13,8 +14,6 @@ import camelot
 import pytesseract
 from pdf2image import convert_from_path
 from fuzzywuzzy import fuzz
-import cv2
-import difflib
 
 from langchain.agents import Tool, AgentExecutor, create_react_agent
 from langchain_community.chat_models import ChatOllama
@@ -73,64 +72,56 @@ def clean_df(df):
 def df_to_text(df, title=None):
     rows = [f"{title or ''}".strip()]
     for _, row in df.iterrows():
-        row_str = " | ".join(f"{(col or '').strip()}: {str(val).strip()}" for col, val in row.items())
+        row_str = " | ".join(
+            f"{(col or '').strip()}: {str(val).strip()}" for col, val in row.items()
+        )
         rows.append(row_str)
     return "\n".join(rows)
 
 def extract_scanned_table(pdf_path):
     try:
         images = convert_from_path(pdf_path)
-        all_dfs = []
+        stitched_tables = []
+        prev_headers = None
+        current_rows = []
+
         for img in images:
-            img_cv = np.array(img)
-            gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)
-            _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
             data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DATAFRAME)
             data = data.dropna(subset=["text"])
             data = data[data['conf'].astype(int) > 40]
-
-            # Group words into lines using y proximity
-            lines = defaultdict(list)
-            for _, row in data.iterrows():
-                y = row['top']
-                text = row['text']
-                matched_line = None
-                for key in lines:
-                    if abs(key - y) < 10:
-                        matched_line = key
-                        break
-                if matched_line is not None:
-                    lines[matched_line].append((row['left'], text))
-                else:
-                    lines[y].append((row['left'], text))
-
-            sorted_lines = []
-            for key in sorted(lines):
-                line = lines[key]
-                line.sort()  # by x position
-                words = [w[1] for w in line if w[1].strip()]
-                sorted_lines.append(words)
-
-            max_cols = max(len(l) for l in sorted_lines) if sorted_lines else 0
-            if max_cols < 2:
-                continue
-
-            header_line = max(sorted_lines, key=lambda r: len([w for w in r if len(w) > 1]))
-            headers = [h if h.strip() else f"col{i}" for i, h in enumerate(header_line)]
+            grouped = data.groupby(['block_num', 'par_num', 'line_num'])
 
             rows = []
-            for line in sorted_lines:
-                if line == header_line or len(line) < 2:
-                    continue
+            for _, group in grouped:
+                line = group.sort_values("left")["text"].tolist()
                 rows.append(line)
 
-            padded_rows = [r + [""] * (len(headers) - len(r)) for r in rows]
-            df = pd.DataFrame(padded_rows, columns=headers)
-            df = clean_df(df)
-            if not df.empty:
-                all_dfs.append(df)
+            if not rows:
+                continue
 
-        return all_dfs
+            max_cols = max(len(row) for row in rows)
+            padded = [row + [""] * (max_cols - len(row)) for row in rows]
+            df_raw = pd.DataFrame(padded).replace("", pd.NA).dropna(how="all").fillna("")
+
+            header_row_idx = df_raw.apply(lambda r: r.str.len().gt(1).sum(), axis=1).idxmax()
+            headers = df_raw.iloc[header_row_idx].tolist()
+            headers = [h if h.strip() else f"col{i}" for i, h in enumerate(headers)]
+
+            df = df_raw.iloc[header_row_idx + 1:].reset_index(drop=True)
+            df.columns = headers
+
+            if prev_headers and headers == prev_headers:
+                current_rows.append(df)
+            else:
+                if current_rows:
+                    stitched_tables.append(pd.concat(current_rows, ignore_index=True))
+                current_rows = [df]
+                prev_headers = headers
+
+        if current_rows:
+            stitched_tables.append(pd.concat(current_rows, ignore_index=True))
+
+        return stitched_tables
     except Exception as e:
         return []
 
@@ -176,9 +167,10 @@ def extract_tables_pdf(pdf_path):
 def extract_all_tables(path, scanned):
     if scanned:
         dfs = extract_scanned_table(path)
-        if dfs:
-            return [(df, "") for df in dfs]
+        return [(df, "") for df in dfs]
     return extract_tables_pdf(path)
+
+# rest of the code remains unchanged
 
 def load_and_index(files, scanned=False):
     embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
