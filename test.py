@@ -52,6 +52,20 @@ section[data-testid="stSidebar"] {
 """, unsafe_allow_html=True)
 
 # --- Helpers ---
+def clean_df(df):
+    # Deduplicate column names manually
+    seen = {}
+    new_columns = []
+    for col in df.columns:
+        count = seen.get(col, 0)
+        if count:
+            new_columns.append(f"{col}_{count}")
+        else:
+            new_columns.append(col)
+        seen[col] = count + 1
+    df.columns = new_columns
+    return df.fillna("")
+
 def df_to_text(df, title=None):
     """
     Convert DataFrame to readable text format.
@@ -63,13 +77,6 @@ def df_to_text(df, title=None):
             f"{str(col).strip() if col is not None else ''}: {str(val).strip() if val is not None else ''}"
             for col, val in row.items()
         )
-        rows.append(row_str)
-    return "\n".join(rows)
-
-def df_to_text(df, title=None):
-    rows = [f"{title or ''}".strip()]
-    for _, row in df.iterrows():
-        row_str = " | ".join(f"{col.strip()}: {str(val).strip()}" for col, val in row.items())
         rows.append(row_str)
     return "\n".join(rows)
 
