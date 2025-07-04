@@ -9,7 +9,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from PIL import Image
-import fitz  # PyMuPDF
+import fitz  # <-- make sure this is from PyMuPDF
 import pytesseract
 from pdf2image import convert_from_path
 from fuzzywuzzy import fuzz
@@ -31,8 +31,8 @@ OLLAMA_LLM_MODEL = "llama3"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
-st.set_page_config(page_title="PDF QA without LayoutParser", layout="wide")
-st.title("📄 PDF QA with Table Matching (No LayoutParser)")
+st.set_page_config(page_title="PDF QA with Table Matching", layout="wide")
+st.title("📄 PDF QA with Table Matching")
 
 # --- Session State ---
 if "vs" not in st.session_state:
@@ -55,10 +55,6 @@ section[data-testid="stSidebar"] {
 """, unsafe_allow_html=True)
 
 # --- Helpers ---
-def clean_df(df):
-    df.columns = pd.io.parsers.ParserBase({'names': df.columns})._maybe_dedup_names(df.columns)
-    return df.fillna("")
-
 def df_to_text(df, title=None):
     lines = [f"{title or ''}".strip()] if title else []
     for _, row in df.iterrows():
@@ -127,7 +123,7 @@ def extract_tables_scanned_ocr(pdf_path, show_debug=False):
 def extract_tables_text(pdf_path):
     results = []
     try:
-        doc = fitz.open(pdf_path)
+        doc = fitz.open(pdf_path)  # ✅ Will now work after uninstalling wrong fitz
         full_text = "\n".join([page.get_text() for page in doc])
         results.append(Document(page_content=full_text, metadata={"source": os.path.basename(pdf_path)}))
     except Exception as e:
@@ -254,8 +250,10 @@ Context:
 Question: {query}
 Answer in bullet points or structured format.
 """
-                response = llm.invoke(prompt).strip()
-                st.markdown(response)
-                st.session_state.msgs.append({"role": "assistant", "content": response})
+                response = llm.invoke(prompt)
+                response_text = response.content.strip() if hasattr(response, "content") else str(response).strip()
+
+                st.markdown(response_text)
+                st.session_state.msgs.append({"role": "assistant", "content": response_text})
     else:
         st.error("⚠ Please upload and index files first.")
