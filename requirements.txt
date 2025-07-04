@@ -13,21 +13,21 @@ pdfplumber>=0.10.2
 pdf2image>=1.16.3
 
 # Table Extraction
-camelot-py[cv]>=0.11.0
+camelot-py[cv]
 
 # OCR
-pytesseract>=0.3.10
+pytesseract
 
 # LangChain Core & Community
-langchain>=0.1.16
-langchain-core>=0.1.45
-langchain-community>=0.0.30
+langchain
+langchain-core
+langchain-community
 
 # Ollama LLM + Embeddings (external running Ollama server required)
-ollama>=0.1.6
+ollama
 
 # FAISS with GPU Support
-faiss-gpu>=1.7.4
+faiss-gpu
 
 # GPU-Accelerated Deep Learning (Torch + CUDA 11.8)
 torch==2.1.2+cu118
@@ -36,6 +36,6 @@ torchaudio==2.1.2+cu118
 --find-links https://download.pytorch.org/whl/torch_stable.html
 
 # Logging & Utilities
-loguru>=0.7.2
-opencv-python-headless>=4.8.0.76
-python-dotenv>=1.0.1
+loguru
+opencv-python-headless
+python-dotenv
