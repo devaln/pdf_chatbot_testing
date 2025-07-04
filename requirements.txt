@@ -1,34 +1,17 @@
-# Core App & UI
 streamlit
-pandas
-numpy
-Pillow
+pytesseract
 pdf2image
-PyMuPDF
+pillow
+pymupdf
 pdfplumber
 camelot-py[cv]
-
-# OCR
-pytesseract
-
-# Fuzzy Matching
+numpy
+pandas
 fuzzywuzzy
 python-Levenshtein
-
-# LangChain + Ollama
-langchain>=0.1.16
+langchain
 langchain-community
 langchain-core
-langchain-text-splitters
-langchainhub
-langchain-experimental>=0.0.52
-
-# Embeddings & Vector Store
+langchain-experimental
 faiss-cpu
-nomic
-
-# PDF dependencies (for pdf2image)
-poppler-utils  # Not installable via pip. Required system dependency for pdf2image.
-
-# Optional Logging
-loguru
+tqdm
