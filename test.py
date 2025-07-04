@@ -2,16 +2,19 @@
 import os
 import tempfile
 import shutil
+import logging
 import streamlit as st
 import pandas as pd
 import numpy as np
 from PIL import Image
 import fitz  # PyMuPDF
 import pdfplumber
-from pdf2image import convert_from_path
+import camelot
 import pytesseract
-import layoutparser as lp
+from pdf2image import convert_from_path
 from fuzzywuzzy import fuzz
+import layoutparser as lp
+from layoutparser import TesseractAgent
 
 from langchain.agents import Tool, AgentExecutor, create_react_agent
 from langchain_community.chat_models import ChatOllama
@@ -29,7 +32,7 @@ OLLAMA_LLM_MODEL = "llama3"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
-st.set_page_config(page_title="PDF QA + Table Agent", layout="wide")
+st.set_page_config(page_title="PDF QA + LayoutParser", layout="wide")
 st.title("📄 PDF QA with Table Matching + LayoutParser")
 
 # --- Session State ---
@@ -41,16 +44,6 @@ if "msgs" not in st.session_state:
     st.session_state.msgs = []
 if "tables" not in st.session_state:
     st.session_state.tables = []
-
-# --- Style ---
-st.markdown("""
-<style>
-section[data-testid="stSidebar"] {
-    background-color: white;
-    border-right: 1px solid #ccc;
-}
-</style>
-""", unsafe_allow_html=True)
 
 # --- Helpers ---
 def dedup_columns(columns):
@@ -76,51 +69,48 @@ def df_to_text(df, title=None):
         rows.append(row_str)
     return "\n".join(rows)
 
-# --- LayoutParser OCR for Scanned PDFs ---
 def extract_tables_layoutparser(pdf_path):
+    dfs = []
     images = convert_from_path(pdf_path)
-    agent = lp.TesseractAgent(languages='eng')
-    all_tables = []
+    agent = TesseractAgent()
 
     for img in images:
         layout = agent.detect(img)
 
-        blocks = [b for b in layout if b.type == 'Text']
-        blocks = sorted(blocks, key=lambda b: (b.block.y_1, b.block.x_1))
+        blocks = [b for b in layout if hasattr(b, "type") and b.type == "Text"]
+        blocks.sort(key=lambda b: (b.block.y_1, b.block.x_1))
 
         rows = []
-        current_row = []
+        current_line = []
         prev_y = None
+        threshold = 15
 
         for block in blocks:
-            y = block.block.y_1
             text = block.text.strip()
             if not text:
                 continue
-            if prev_y is None or abs(y - prev_y) < 15:
-                current_row.append((block.block.x_1, text))
+            y = block.block.y_1
+            if prev_y is None or abs(y - prev_y) < threshold:
+                current_line.append(text)
             else:
-                row_sorted = [t[1] for t in sorted(current_row, key=lambda x: x[0])]
-                rows.append(row_sorted)
-                current_row = [(block.block.x_1, text)]
+                rows.append(current_line)
+                current_line = [text]
             prev_y = y
 
-        if current_row:
-            row_sorted = [t[1] for t in sorted(current_row, key=lambda x: x[0])]
-            rows.append(row_sorted)
+        if current_line:
+            rows.append(current_line)
 
-        if len(rows) < 2:
+        if not rows:
             continue
 
         max_len = max(len(r) for r in rows)
-        padded_rows = [r + [""] * (max_len - len(r)) for r in rows]
-        df = pd.DataFrame(padded_rows[1:], columns=padded_rows[0])
-        df = df.replace("", np.nan).dropna(how="all").fillna("")
-        all_tables.append(df)
+        padded = [r + [""] * (max_len - len(r)) for r in rows]
 
-    return all_tables
+        df = pd.DataFrame(padded[1:], columns=padded[0])
+        dfs.append(df)
 
-# --- Unscanned PDF Extractor ---
+    return dfs
+
 def extract_tables_pdf(pdf_path):
     results = []
     prev_header = None
@@ -166,7 +156,6 @@ def extract_all_tables(path, scanned):
         return [(df, "") for df in dfs]
     return extract_tables_pdf(path)
 
-# --- Load and Index ---
 def load_and_index(files, scanned=False):
     embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
     docs = []
@@ -209,7 +198,6 @@ def fuzzy_match_table(query):
             best_table = table
     return best_table if best_score >= 70 else None
 
-# --- Pandas Agent ---
 def run_pandas_agent(df, user_query):
     llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
     tool = Tool(name="pandas_agent", description="Execute Python code to analyze a table", func=PythonREPLTool().run)
@@ -272,8 +260,7 @@ if query := st.chat_input("Ask a question..."):
             with st.spinner("Searching documents..."):
                 results = st.session_state.vs.similarity_search_with_score(query, k=6)
                 top_chunks = [
-                    f"[Source: {doc.metadata.get('source', 'unknown')}]\n{doc.page_content}"
-                    for doc, score in sorted(results, key=lambda x: x[1])[:5]
+                    f"{doc.page_content}" for doc, score in sorted(results, key=lambda x: x[1])[:5]
                 ]
                 context = "\n\n".join(top_chunks)
                 sub_questions = [q.strip() for q in query.replace("&", " and ").split(" and ") if q.strip()]
