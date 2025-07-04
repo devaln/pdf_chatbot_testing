@@ -24,7 +24,7 @@ from langchain_community.chat_models import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnablePassthrough, Runnable
 
 # --- Config ---
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -32,21 +32,12 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_LLM_MODEL = "llama3:latest"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
+CHAT_DIR = "./chat_sessions"
 
-# --- UI Setup ---
+logging.basicConfig(level=logging.INFO, filename="app.log", format="%(asctime)s [%(levelname)s] %(message)s")
+
 st.set_page_config(page_title="PDF QA with Tables", layout="wide")
 st.title("📄 PDF Text & Table Extractor + Chat QA")
-st.markdown("""
-    <style>
-        section[data-testid="stSidebar"] {
-            background-color: white !important;
-            border-right: 2px solid #e0e0e0 !important;
-        }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- Logging Setup ---
-logging.basicConfig(level=logging.INFO, filename="app.log", format="%(asctime)s [%(levelname)s] %(message)s")
 
 # --- Helpers ---
 def clean_df(df):
@@ -104,7 +95,6 @@ def extract_scanned_pdf_with_ocr(pdf_path):
             df_raw = pd.DataFrame(padded)
 
             df_raw = df_raw.replace("", pd.NA).dropna(how="all").fillna("")
-
             header_row_idx = df_raw.apply(lambda row: row.str.len().gt(1).sum(), axis=1).idxmax()
             headers = df_raw.iloc[header_row_idx].tolist()
             headers = [h if h.strip() else "column" for h in headers]
@@ -161,10 +151,12 @@ def load_and_index(files, scanned_mode=False):
     if not all_docs:
         return None
 
-    chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(all_docs)
-    for chunk in chunks:
-        if "source" not in chunk.metadata:
-            chunk.metadata["source"] = "unknown"
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = []
+    for doc in all_docs:
+        for chunk in splitter.split_documents([doc]):
+            chunk.metadata["source"] = doc.metadata.get("source", "unknown")
+            chunks.append(chunk)
 
     try:
         embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
@@ -173,22 +165,36 @@ def load_and_index(files, scanned_mode=False):
             vs.add_documents(chunks)
         else:
             vs = FAISS.from_documents(chunks, embed)
-
         vs.save_local(DB_DIR)
         st.success("✅ Index built.")
         return vs
     except Exception as e:
         logging.error(f"Indexing error: {e}")
-        st.error("Indexing failed.")
         return None
 
+# --- Filter Retriever to reduce mixed context ---
+class TopKFilterRetriever(Runnable):
+    def _init_(self, retriever, top_k=8):
+        self.retriever = retriever
+        self.top_k = top_k
+
+    def invoke(self, query, config=None):
+        docs = self.retriever.get_relevant_documents(query)
+        if not docs:
+            return ""
+        grouped = {}
+        for doc in docs:
+            grouped.setdefault(doc.metadata.get("source", "unknown"), []).append(doc)
+        top_source = max(grouped.items(), key=lambda x: len(x[1]))[0]
+        top_docs = grouped[top_source]
+        return "\n\n".join([doc.page_content for doc in top_docs])
+
 def get_chat_chain(vs):
-    retriever = vs.as_retriever(search_kwargs={"k": 6})
-    prompt = ChatPromptTemplate.from_template(
-        "You are a table analysis expert.\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:"
-    )
+    retriever = vs.as_retriever(search_kwargs={"k": 10})
+    filtered = TopKFilterRetriever(retriever)
+    prompt = ChatPromptTemplate.from_template("You are a table analysis expert.\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:")
     llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
-    return {"context": retriever, "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
+    return {"context": filtered, "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
 
 # --- UI ---
 st.sidebar.image("img/ACL_Digital.png", width=180)
@@ -215,7 +221,6 @@ if st.sidebar.button("🗑 Clear DB"):
 
 if "vs" not in st.session_state:
     st.session_state.vs = None
-
 if "msgs" not in st.session_state:
     st.session_state.msgs = []
 
