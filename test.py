@@ -1,6 +1,7 @@
 # --- Imports ---
 import os
 import json
+import uuid
 import tempfile
 import shutil
 import logging
@@ -29,12 +30,12 @@ OLLAMA_LLM_MODEL = "llama3:latest"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
-st.set_page_config(page_title="PDF QA with JSON Tables", layout="wide")
+st.set_page_config(page_title="PDF JSON Table QA", layout="wide")
 st.title("📊 PDF JSON Table Extractor + QA Chat")
 
 logging.basicConfig(level=logging.INFO, filename="app.log", format="%(asctime)s [%(levelname)s] %(message)s")
 
-# --- Helpers ---
+# --- Helper Functions ---
 def extract_text_from_pdf(path):
     try:
         doc = fitz.open(path)
@@ -43,11 +44,22 @@ def extract_text_from_pdf(path):
         logging.warning(f"Text extraction failed: {e}")
         return ""
 
+def extract_text_from_scanned_pdf(path):
+    try:
+        images = convert_from_path(path, dpi=300)
+        text = ""
+        for img in images:
+            text += pytesseract.image_to_string(img) + "\n"
+        return text
+    except Exception as e:
+        logging.error(f"OCR failed: {e}")
+        return ""
+
 def ask_llm_for_json_tables(text):
     prompt = f"""
 You are a table extraction expert.
 
-Extract all tables from the text below. Return the result as a JSON list of objects like:
+Extract all tables from the following text. Return the result as a JSON array of objects like:
 
 [
   {{
@@ -60,7 +72,6 @@ Extract all tables from the text below. Return the result as a JSON list of obje
 Text:
 {text}
 """
-
     try:
         res = requests.post(
             f"{OLLAMA_BASE_URL}/api/generate",
@@ -70,53 +81,39 @@ Text:
         output = res.json().get("response", "")
         return json.loads(output)
     except Exception as e:
-        logging.error(f"Failed to parse LLM JSON: {e}")
+        logging.error(f"Failed to parse JSON from LLM: {e}")
         return []
-
-def extract_from_scanned_pdf(path):
-    try:
-        images = convert_from_path(path, dpi=300)
-        text = ""
-        for img in images:
-            ocr_text = pytesseract.image_to_string(img)
-            text += ocr_text + "\n"
-        return text
-    except Exception as e:
-        logging.error(f"OCR failed: {e}")
-        return ""
 
 def extract_all_tables(path, scanned_mode=False):
     if scanned_mode:
-        text = extract_from_scanned_pdf(path)
+        raw_text = extract_text_from_scanned_pdf(path)
     else:
-        text = extract_text_from_pdf(path)
+        raw_text = extract_text_from_pdf(path)
         try:
             with pdfplumber.open(path) as pdf:
                 for page in pdf.pages:
-                    tables = page.extract_tables()
-                    for table in tables:
+                    for table in page.extract_tables():
                         if table:
                             df = pd.DataFrame(table[1:], columns=table[0])
-                            text += "\n" + df.to_csv(index=False)
+                            raw_text += "\n" + df.to_csv(index=False)
         except:
             pass
 
-    table_objs = ask_llm_for_json_tables(text)
+    table_objs = ask_llm_for_json_tables(raw_text)
     table_chunks = []
     for table in table_objs:
         title = table.get("table_title", "")
-        cols = table.get("columns", [])
+        columns = table.get("columns", [])
         rows = table.get("rows", [])
         try:
-            df = pd.DataFrame(rows, columns=cols)
+            df = pd.DataFrame(rows, columns=columns)
             st.subheader(f"📌 {title or 'Unnamed Table'}")
             st.dataframe(df)
             chunk = f"Title: {title}\n\n{df.to_csv(index=False)}"
             table_chunks.append(chunk)
         except Exception as e:
-            logging.warning(f"Bad table skipped: {e}")
-
-    return "\n\n".join(table_chunks), text
+            logging.warning(f"Skipping bad table: {e}")
+    return "\n\n".join(table_chunks), raw_text
 
 @st.cache_resource(show_spinner=False)
 def load_existing_index():
@@ -124,7 +121,8 @@ def load_existing_index():
     try:
         embeddings = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
         return FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
-    except:
+    except Exception as e:
+        st.error(f"Failed to load existing index: {e}")
         return None
 
 def load_and_index(files, scanned_mode=False):
@@ -137,14 +135,13 @@ def load_and_index(files, scanned_mode=False):
             try:
                 loader = PyPDFLoader(file_path)
                 all_docs.extend(loader.load())
-                tables, text = extract_all_tables(file_path, scanned_mode)
-                combined = f"{tables}\n\n{text}"
-                all_docs.append(Document(page_content=combined, metadata={"source": file.name}))
+                tables, raw_text = extract_all_tables(file_path, scanned_mode)
+                all_docs.append(Document(page_content=tables + "\n\n" + raw_text, metadata={"source": file.name}))
             except Exception as e:
                 st.error(f"{file.name} failed: {e}")
 
     if not all_docs:
-        st.warning("No data extracted.")
+        st.warning("No documents successfully processed.")
         return None
 
     chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(all_docs)
@@ -157,7 +154,7 @@ def load_and_index(files, scanned_mode=False):
         vs = FAISS.from_documents(chunks, embeddings)
 
     vs.save_local(DB_DIR)
-    st.success("✅ Indexed successfully!")
+    st.success("✅ Documents indexed successfully!")
     return vs
 
 def get_chat_chain(vs):
@@ -176,14 +173,19 @@ with st.sidebar:
     st.image("img/Cipla_Foundation.png", width=180)
     st.markdown("---")
     st.header("📂 Upload PDFs")
-    uploaded = st.file_uploader("Upload PDF(s)", type="pdf", accept_multiple_files=True, key="upload_key")
+
+    # Dynamic key to reset uploader
+    if "uploader_key" not in st.session_state:
+        st.session_state.uploader_key = str(uuid.uuid4())
+
+    uploaded = st.file_uploader("Upload PDF(s)", type="pdf", accept_multiple_files=True, key=st.session_state.uploader_key)
     scanned_mode = st.checkbox("📸 PDF is scanned?")
     if st.button("📊 Extract & Index"):
         if uploaded:
             st.session_state.msgs = []
-            with st.spinner("Processing and indexing..."):
+            with st.spinner("Processing PDFs..."):
                 st.session_state.vs = load_and_index(uploaded, scanned_mode)
-            st.session_state["upload_key"] = None  # clear file list from sidebar
+            st.session_state.uploader_key = str(uuid.uuid4())  # Reset uploader key
 
     st.markdown("---")
     if st.button("🗑 Clear DB"):
@@ -192,7 +194,7 @@ with st.sidebar:
     if st.button("🧹 Clear Chat"):
         st.session_state.msgs = []
 
-# --- Main Chat ---
+# --- Main Chat Logic ---
 if "vs" not in st.session_state:
     st.session_state.vs = load_existing_index()
 if "msgs" not in st.session_state:
@@ -202,7 +204,7 @@ for msg in st.session_state.msgs:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if query := st.chat_input("Ask about tables or data..."):
+if query := st.chat_input("Ask about any table, row, or PDF content..."):
     st.session_state.msgs.append({"role": "user", "content": query})
     with st.chat_message("user"):
         st.markdown(query)
@@ -211,8 +213,8 @@ if query := st.chat_input("Ask about tables or data..."):
         chain = get_chat_chain(st.session_state.vs)
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                answer = "".join(chain.stream(query))
-                st.markdown(answer)
-                st.session_state.msgs.append({"role": "assistant", "content": answer})
+                response = "".join(chain.stream(query))
+                st.markdown(response)
+                st.session_state.msgs.append({"role": "assistant", "content": response})
     else:
         st.error("Please upload and index documents first.")
