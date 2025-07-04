@@ -7,65 +7,73 @@ import shutil
 import logging
 import streamlit as st
 import pandas as pd
-import fitz  # PyMuPDF
+import fitz
 import pdfplumber
-import camelot
 import pytesseract
 import requests
+from fuzzywuzzy import fuzz
 from pdf2image import convert_from_path
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain_community.vectorstores import FAISS
+from sentence_transformers import SentenceTransformer
+from langchain.vectorstores import FAISS
+from langchain.schema import Document
 from langchain_community.chat_models import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.runnables import RunnablePassthrough
+import pandasql as psql
 
 # --- Config ---
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_LLM_MODEL = "llama3:latest"
-OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
+TOP_K = 5
 
-st.set_page_config(page_title="PDF JSON Table QA", layout="wide")
-st.title("📊 PDF JSON Table Extractor + QA Chat")
+# --- Embedding ---
+bge_model = SentenceTransformer("BAAI/bge-base-en-v1.5")
 
+class BGEEmbedder:
+    def embed_documents(self, texts):
+        return bge_model.encode(texts, normalize_embeddings=True).tolist()
+    def embed_query(self, query):
+        return bge_model.encode(query, normalize_embeddings=True).tolist()
+
+embedder = BGEEmbedder()
+
+# --- App UI ---
+st.set_page_config(page_title="PDF QA with Fuzzy Tables + Pandas Agent", layout="wide")
+st.title("📊 PDF QA: Table Matching + Smart Queries")
+
+# --- Cache & Logging ---
 logging.basicConfig(level=logging.INFO, filename="app.log", format="%(asctime)s [%(levelname)s] %(message)s")
 
-# --- Helper Functions ---
+# --- Table Storage ---
+if "table_store" not in st.session_state:
+    st.session_state.table_store = []
+
 def extract_text_from_pdf(path):
     try:
         doc = fitz.open(path)
         return "\n".join([page.get_text() for page in doc])
-    except Exception as e:
-        logging.warning(f"Text extraction failed: {e}")
+    except:
         return ""
 
 def extract_text_from_scanned_pdf(path):
     try:
         images = convert_from_path(path, dpi=300)
-        text = ""
-        for img in images:
-            text += pytesseract.image_to_string(img) + "\n"
-        return text
-    except Exception as e:
-        logging.error(f"OCR failed: {e}")
+        return "\n".join([pytesseract.image_to_string(img) for img in images])
+    except:
         return ""
 
 def ask_llm_for_json_tables(text):
     prompt = f"""
-You are a table extraction expert.
-
-Extract all tables from the following text. Return the result as a JSON array of objects like:
+Extract all tables from the following text and return them as JSON objects in this format:
 
 [
   {{
-    "table_title": "optional title above the table",
-    "columns": ["col1", "col2", ...],
-    "rows": [["val1", "val2", ...], ...]
+    "table_title": "title above table",
+    "columns": ["col1", "col2"],
+    "rows": [["r1", "r2"], ...]
   }}
 ]
 
@@ -78,54 +86,33 @@ Text:
             json={"model": OLLAMA_LLM_MODEL, "prompt": prompt, "stream": False},
             timeout=120
         )
-        output = res.json().get("response", "")
-        return json.loads(output)
+        return json.loads(res.json().get("response", "[]"))
     except Exception as e:
-        logging.error(f"Failed to parse JSON from LLM: {e}")
+        logging.error(f"JSON parse failed: {e}")
         return []
 
-def extract_all_tables(path, scanned_mode=False):
-    if scanned_mode:
-        raw_text = extract_text_from_scanned_pdf(path)
-    else:
-        raw_text = extract_text_from_pdf(path)
-        try:
-            with pdfplumber.open(path) as pdf:
-                for page in pdf.pages:
-                    for table in page.extract_tables():
-                        if table:
-                            df = pd.DataFrame(table[1:], columns=table[0])
-                            raw_text += "\n" + df.to_csv(index=False)
-        except:
-            pass
+def extract_all_tables(path, scanned=False):
+    text = extract_text_from_scanned_pdf(path) if scanned else extract_text_from_pdf(path)
 
-    table_objs = ask_llm_for_json_tables(raw_text)
-    table_chunks = []
+    table_objs = ask_llm_for_json_tables(text)
+    combined_chunks = []
+
     for table in table_objs:
-        title = table.get("table_title", "")
-        columns = table.get("columns", [])
+        title = table.get("table_title", "Unnamed Table")
+        cols = table.get("columns", [])
         rows = table.get("rows", [])
         try:
-            df = pd.DataFrame(rows, columns=columns)
-            st.subheader(f"📌 {title or 'Unnamed Table'}")
+            df = pd.DataFrame(rows, columns=cols)
+            st.session_state.table_store.append({"title": title, "df": df})
+            st.subheader(f"📌 {title}")
             st.dataframe(df)
-            chunk = f"Title: {title}\n\n{df.to_csv(index=False)}"
-            table_chunks.append(chunk)
+            combined_chunks.append(f"Title: {title}\n{df.to_csv(index=False)}")
         except Exception as e:
-            logging.warning(f"Skipping bad table: {e}")
-    return "\n\n".join(table_chunks), raw_text
-
-@st.cache_resource(show_spinner=False)
-def load_existing_index():
-    if not os.path.exists(DB_DIR): return None
-    try:
-        embeddings = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
-        return FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
-    except Exception as e:
-        st.error(f"Failed to load existing index: {e}")
-        return None
-
-def load_and_index(files, scanned_mode=False):
+            logging.warning(f"Bad table skipped: {e}")
+    return "\n\n".join(combined_chunks), text
+# --- FAISS Indexing ---
+def load_and_index(files, scanned=False):
+    from langchain.vectorstores import FAISS
     all_docs = []
     with tempfile.TemporaryDirectory() as td:
         for file in files:
@@ -133,39 +120,74 @@ def load_and_index(files, scanned_mode=False):
             with open(file_path, "wb") as f:
                 f.write(file.getbuffer())
             try:
-                loader = PyPDFLoader(file_path)
-                all_docs.extend(loader.load())
-                tables, raw_text = extract_all_tables(file_path, scanned_mode)
-                all_docs.append(Document(page_content=tables + "\n\n" + raw_text, metadata={"source": file.name}))
+                text = extract_text_from_pdf(file_path) if not scanned else extract_text_from_scanned_pdf(file_path)
+                tables, _ = extract_all_tables(file_path, scanned)
+                doc_text = f"{tables}\n\n{text}"
+                all_docs.append(Document(page_content=doc_text, metadata={"source": file.name}))
             except Exception as e:
                 st.error(f"{file.name} failed: {e}")
 
     if not all_docs:
-        st.warning("No documents successfully processed.")
+        st.warning("No documents processed.")
         return None
 
     chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(all_docs)
-    embeddings = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
+    texts = [c.page_content for c in chunks]
+    metadatas = [c.metadata for c in chunks]
+    vectors = embedder.embed_documents(texts)
 
     if os.path.exists(DB_DIR):
-        vs = FAISS.load_local(DB_DIR, embeddings, allow_dangerous_deserialization=True)
-        vs.add_documents(chunks)
+        faiss_index = FAISS.load_local(DB_DIR, embedder, allow_dangerous_deserialization=True)
+        faiss_index.add_texts(texts, metadatas)
     else:
-        vs = FAISS.from_documents(chunks, embeddings)
+        faiss_index = FAISS.from_texts(texts, embedder, metadatas=metadatas)
 
-    vs.save_local(DB_DIR)
-    st.success("✅ Documents indexed successfully!")
-    return vs
+    faiss_index.save_local(DB_DIR)
+    st.success("✅ Indexed successfully!")
+    return faiss_index
+
+def load_existing_index():
+    if not os.path.exists(DB_DIR): return None
+    try:
+        return FAISS.load_local(DB_DIR, embedder, allow_dangerous_deserialization=True)
+    except Exception as e:
+        st.error(f"Index load error: {e}")
+        return None
 
 def get_chat_chain(vs):
-    prompt = ChatPromptTemplate.from_template("You are a JSON table QA expert.\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:")
+    retriever = vs.as_retriever(search_kwargs={"k": TOP_K})
+    prompt = ChatPromptTemplate.from_template(
+        "You are a helpful assistant for analyzing PDF content.\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:"
+    )
     llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
-    return {"context": vs.as_retriever(), "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
+    return {"context": retriever, "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
+
+def fuzzy_match_table(query):
+    best = {"score": 0, "title": None, "df": None}
+    for t in st.session_state.table_store:
+        score = fuzz.partial_ratio(query.lower(), t["title"].lower())
+        if score > best["score"]:
+            best = {"score": score, "title": t["title"], "df": t["df"]}
+    return best if best["score"] >= 70 else None
+
+def run_pandas_agent(df, query):
+    try:
+        query_lower = query.lower()
+        if "total" in query_lower or "sum" in query_lower:
+            return df.sum(numeric_only=True).to_frame("Total")
+        elif "average" in query_lower or "mean" in query_lower:
+            return df.mean(numeric_only=True).to_frame("Average")
+        elif "where" in query_lower:
+            return psql.sqldf(f"SELECT * FROM df WHERE {query_lower.split('where')[1]}", locals())
+        else:
+            return df.head()
+    except Exception as e:
+        return f"❌ Pandas agent failed: {e}"
 
 def clear_db():
     if os.path.exists(DB_DIR):
         shutil.rmtree(DB_DIR)
-        st.success("🗑 FAISS index cleared.")
+        st.success("🗑 Index cleared.")
 
 # --- Sidebar ---
 with st.sidebar:
@@ -174,7 +196,6 @@ with st.sidebar:
     st.markdown("---")
     st.header("📂 Upload PDFs")
 
-    # Dynamic key to reset uploader
     if "uploader_key" not in st.session_state:
         st.session_state.uploader_key = str(uuid.uuid4())
 
@@ -183,9 +204,10 @@ with st.sidebar:
     if st.button("📊 Extract & Index"):
         if uploaded:
             st.session_state.msgs = []
-            with st.spinner("Processing PDFs..."):
+            st.session_state.table_store = []
+            with st.spinner("Processing..."):
                 st.session_state.vs = load_and_index(uploaded, scanned_mode)
-            st.session_state.uploader_key = str(uuid.uuid4())  # Reset uploader key
+            st.session_state.uploader_key = str(uuid.uuid4())
 
     st.markdown("---")
     if st.button("🗑 Clear DB"):
@@ -194,7 +216,7 @@ with st.sidebar:
     if st.button("🧹 Clear Chat"):
         st.session_state.msgs = []
 
-# --- Main Chat Logic ---
+# --- Main Chat ---
 if "vs" not in st.session_state:
     st.session_state.vs = load_existing_index()
 if "msgs" not in st.session_state:
@@ -204,12 +226,21 @@ for msg in st.session_state.msgs:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if query := st.chat_input("Ask about any table, row, or PDF content..."):
+if query := st.chat_input("Ask about a table (e.g., revenue from finance table)..."):
     st.session_state.msgs.append({"role": "user", "content": query})
     with st.chat_message("user"):
         st.markdown(query)
 
-    if st.session_state.vs:
+    match = fuzzy_match_table(query)
+    if match:
+        with st.chat_message("assistant"):
+            st.markdown(f"🔍 Matched Table: *{match['title']}*")
+            result = run_pandas_agent(match["df"], query)
+            if isinstance(result, str):
+                st.markdown(result)
+            else:
+                st.dataframe(result)
+    elif st.session_state.vs:
         chain = get_chat_chain(st.session_state.vs)
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
