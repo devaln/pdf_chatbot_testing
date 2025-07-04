@@ -5,22 +5,23 @@ import shutil
 import streamlit as st
 import pandas as pd
 import numpy as np
-import fitz
+from PIL import Image
+import fitz  # PyMuPDF
 import pdfplumber
+import camelot
 import pytesseract
 from pdf2image import convert_from_path
 from fuzzywuzzy import fuzz
 import layoutparser as lp
-from PIL import Image, ImageDraw
 
-from langchain.agents import Tool, AgentExecutor, create_react_agent
 from langchain_community.chat_models import ChatOllama
-from langchain_core.prompts import PromptTemplate
-from langchain_experimental.tools.python.tool import PythonREPLTool
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+from langchain.agents import Tool, AgentExecutor, create_react_agent
+from langchain_experimental.tools.python.tool import PythonREPLTool
+from langchain_core.prompts import PromptTemplate
 
 # --- Config ---
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -29,10 +30,10 @@ OLLAMA_LLM_MODEL = "llama3"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
-st.set_page_config(page_title="PDF QA with Table Matching + LayoutParser", layout="wide")
+st.set_page_config(page_title="PDF QA + LayoutParser", layout="wide")
 st.title("📄 PDF QA with Table Matching + LayoutParser")
 
-# --- Session ---
+# --- Session State ---
 if "vs" not in st.session_state:
     st.session_state.vs = None
 if "msgs" not in st.session_state:
@@ -41,109 +42,118 @@ if "tables" not in st.session_state:
     st.session_state.tables = []
 
 # --- Helpers ---
+def dedup_columns(columns):
+    seen = {}
+    result = []
+    for col in columns:
+        count = seen.get(col, 0)
+        new_col = f"{col}_{count}" if count else col
+        result.append(new_col)
+        seen[col] = count + 1
+    return result
+
 def clean_df(df):
-    df.columns = pd.io.parsers.ParserBase({'names': df.columns})._maybe_dedup_names(df.columns)
+    df.columns = dedup_columns(df.columns)
     return df.fillna("")
 
 def df_to_text(df, title=None):
-    lines = [f"{title or ''}".strip()]
+    rows = [f"{title or ''}".strip()]
     for _, row in df.iterrows():
-        row_str = " | ".join(f"{col.strip()}: {str(val).strip()}" for col, val in row.items())
-        lines.append(row_str)
-    return "\n".join(lines)
-
+        row_str = " | ".join(f"{(col or '').strip()}: {str(val).strip()}" for col, val in row.items())
+        rows.append(row_str)
+    return "\n".join(rows)
+# --- Scanned PDF Table Extraction using LayoutParser + Tesseract ---
 def extract_tables_layoutparser(pdf_path, show_debug=False):
-    model = lp.Detectron2LayoutModel(
-        config_path="lp://PubLayNet/faster_rcnn_R_50_FPN_3x/config",
-        label_map={0: "Text", 1: "Title", 2: "List", 3: "Table", 4: "Figure"},
-        extra_config=["MODEL.ROI_HEADS.SCORE_THRESH_TEST", 0.5],
-        enforce_cpu=True,
-    )
-    pages = convert_from_path(pdf_path)
-    all_tables = []
+    all_dfs = []
+    images = convert_from_path(pdf_path)
 
-    for i, image in enumerate(pages):
-        layout = model.detect(image)
-        table_blocks = [b for b in layout if b.type == "Table"]
-        if not table_blocks:
-            continue
-
-        image_np = np.array(image)
-        for j, block in enumerate(table_blocks):
-            segment = block.crop_image(image_np)
-            ocr_df = pytesseract.image_to_data(segment, output_type=pytesseract.Output.DATAFRAME)
-            ocr_df = ocr_df.dropna(subset=["text"])
-            ocr_df = ocr_df[ocr_df["conf"].astype(int) > 40]
-            grouped = ocr_df.groupby(['block_num', 'par_num', 'line_num'])
-
-            lines = []
-            for _, grp in grouped:
-                line = grp.sort_values("left")["text"].tolist()
-                lines.append(line)
-
-            if not lines:
-                continue
-
-            max_cols = max(len(r) for r in lines)
-            padded = [r + [""] * (max_cols - len(r)) for r in lines]
-            df_raw = pd.DataFrame(padded).replace("", pd.NA).dropna(how="all").fillna("")
-
-            header_idx = df_raw.apply(lambda r: r.str.len().gt(1).sum(), axis=1).idxmax()
-            headers = df_raw.iloc[header_idx].tolist()
-            headers = [h if h.strip() else f"col{i}" for i, h in enumerate(headers)]
-            df = df_raw.iloc[header_idx + 1:].reset_index(drop=True)
-            df.columns = headers
-            all_tables.append((df, f"Scanned Table Page {i+1}"))
+    model = lp.TesseractLayoutModel(lang='eng')
+    
+    for i, img in enumerate(images):
+        layout = model.detect(img)
+        blocks = [b for b in layout if b.type == 'Text']
 
         if show_debug:
-            debug_img = image.copy()
-            draw = ImageDraw.Draw(debug_img)
-            for block in layout:
-                x1, y1, x2, y2 = map(int, block.coordinates)
-                draw.rectangle([x1, y1, x2, y2], outline="red", width=2)
-                draw.text((x1, y1 - 10), block.type, fill="red")
-            st.image(debug_img, caption=f"Page {i+1} OCR Debug", use_column_width=True)
+            draw = lp.draw_box(img, layout, box_width=1)
+            st.image(draw, caption=f"OCR Blocks - Page {i+1}", use_column_width=True)
 
-    return all_tables
+        rows = []
+        for b in sorted(blocks, key=lambda b: (b.block.y_1, b.block.x_1)):
+            text = b.text.strip()
+            if text:
+                rows.append((int(b.block.y_1), text))
 
-def extract_tables_pdfplumber(pdf_path):
+        clustered = {}
+        for y, text in rows:
+            key = y // 10  # group y-coordinates
+            clustered.setdefault(key, []).append(text)
+
+        table_data = list(clustered.values())
+        max_len = max(len(row) for row in table_data)
+        table_data = [row + [""] * (max_len - len(row)) for row in table_data]
+
+        df_raw = pd.DataFrame(table_data).replace("", pd.NA).dropna(how="all").fillna("")
+        if df_raw.empty: continue
+
+        header_row_idx = df_raw.apply(lambda r: r.str.len().gt(1).sum(), axis=1).idxmax()
+        headers = df_raw.iloc[header_row_idx].tolist()
+        headers = [h if h.strip() else f"col{i}" for i, h in enumerate(headers)]
+
+        df = df_raw.iloc[header_row_idx + 1:].reset_index(drop=True)
+        df.columns = dedup_columns(headers)
+
+        if not df.empty:
+            all_dfs.append((df, f"Scanned Page {i+1}"))
+
+    return all_dfs
+
+# --- Unscanned Table Extraction ---
+def extract_tables_pdf(pdf_path):
     dfs = []
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             tables = page.extract_tables()
-            for t in tables:
-                if t and len(t) > 1:
-                    df = pd.DataFrame(t[1:], columns=t[0])
-                    dfs.append((clean_df(df), ""))
+            for table in tables:
+                if table and len(table) > 1:
+                    df = clean_df(pd.DataFrame(table[1:], columns=table[0]))
+                    title = ""
+                    lines = page.extract_text().split("\n") if page.extract_text() else []
+                    for i, line in enumerate(lines):
+                        if all(col.strip() in line for col in table[0] if col):
+                            if i > 0: title = lines[i - 1].strip()
+                            break
+                    dfs.append((df, title))
     return dfs
 
-def extract_all_tables(path, scanned=False, show_debug=False):
+# --- Main Table Extractor ---
+def extract_all_tables(pdf_path, scanned=False, show_debug=False):
     if scanned:
-        return extract_tables_layoutparser(path, show_debug)
-    return extract_tables_pdfplumber(path)
+        return extract_tables_layoutparser(pdf_path, show_debug)
+    return extract_tables_pdf(pdf_path)
 
+# --- Indexing ---
 def load_and_index(files, scanned=False, show_debug=False):
     embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
-    docs = []
-    tables = []
+    docs, tables = [], []
+
     with tempfile.TemporaryDirectory() as td:
-        for f in files:
-            path = os.path.join(td, f.name)
-            with open(path, "wb") as out:
-                out.write(f.getbuffer())
+        for file in files:
+            path = os.path.join(td, file.name)
+            with open(path, "wb") as f:
+                f.write(file.getbuffer())
 
             table_blocks = extract_all_tables(path, scanned, show_debug)
             for df, title in table_blocks:
                 text = df_to_text(df, title)
-                docs.append(Document(page_content=text, metadata={"source": f.name, "table_title": title}))
-                tables.append({"data": df, "table_title": title, "source": f.name})
+                docs.append(Document(page_content=text, metadata={"source": file.name, "table_title": title}))
+                tables.append({"data": df, "table_title": title, "source": file.name})
 
             try:
                 doc = fitz.open(path)
                 full_text = "\n".join(p.get_text() for p in doc)
-                docs.append(Document(page_content=full_text, metadata={"source": f.name}))
-            except:
-                pass
+                docs.append(Document(page_content=full_text, metadata={"source": file.name}))
+            except Exception as e:
+                st.warning(f"Text extraction failed: {e}")
 
     chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(docs)
     if chunks:
@@ -152,46 +162,20 @@ def load_and_index(files, scanned=False, show_debug=False):
         else:
             st.session_state.vs = FAISS.from_documents(chunks, embed)
         st.session_state.vs.save_local(DB_DIR)
+
     st.session_state.tables.extend(tables)
-
-def fuzzy_match_table(query):
-    best_score = 0
-    best_table = None
-    for table in st.session_state.tables:
-        score = fuzz.partial_ratio(query.lower(), table["table_title"].lower())
-        if score > best_score:
-            best_score = score
-            best_table = table
-    return best_table if best_score >= 70 else None
-
-# --- Agent ---
-def run_pandas_agent(df, user_query):
-    llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
-    tool = Tool(name="pandas_agent", description="Analyze a Pandas table", func=PythonREPLTool().run)
-    prompt = PromptTemplate.from_template("""You are a Pandas expert. The table is loaded as df.
-
-Question: {input}""")
-    agent = create_react_agent(llm, tools=[tool], prompt=prompt)
-    executor = AgentExecutor(agent=agent, tools=[tool], verbose=False)
-
-    context = f"import pandas as pd\ndf = pd.DataFrame({df.to_dict(orient='list')})"
-    try:
-        result = executor.invoke({"input": f"{context}\n\n{user_query}"})
-        return result["output"]
-    except Exception as e:
-        return f"Agent error: {e}"
-
-# --- UI ---
+    st.success("✅ Indexing complete!")
+# --- UI Sidebar ---
 st.sidebar.header("📂 Upload PDFs")
-uploaded = st.sidebar.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
+uploaded = st.sidebar.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True, key=st.session_state.uploader_key)
 scanned_mode = st.sidebar.checkbox("📸 Is Scanned PDF?", value=False)
-show_debug = st.sidebar.checkbox("🛠 Show OCR Debug Overlays", value=False)
+show_debug = st.sidebar.checkbox("🧪 Show OCR Debug Overlays", value=False)
 
 if st.sidebar.button("📊 Extract & Index"):
     if uploaded:
-        with st.spinner("Indexing..."):
+        with st.spinner("🔍 Extracting tables and building index..."):
             load_and_index(uploaded, scanned=scanned_mode, show_debug=show_debug)
-            st.success("✅ Documents indexed.")
+            st.session_state.uploader_key += 1
             st.session_state.msgs = [{"role": "assistant", "content": "Ask about any table or row!"}]
 
 if st.sidebar.button("🧹 Clear Chat"):
@@ -202,44 +186,66 @@ if st.sidebar.button("🗑 Clear DB"):
     st.session_state.tables = []
     st.success("Database cleared.")
 
-# --- Chat Loop ---
+# --- Display Chat Messages ---
 for msg in st.session_state.msgs:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if query := st.chat_input("Ask about any table or row!"):
+# --- Fuzzy Table Matching Logic ---
+def fuzzy_match_table(query):
+    best_score, best_table = 0, None
+    for table in st.session_state.tables:
+        score = fuzz.partial_ratio(query.lower(), table["table_title"].lower())
+        if score > best_score:
+            best_score = score
+            best_table = table
+    return best_table if best_score >= 70 else None
+
+# --- LLM Agent with Pandas ---
+def run_pandas_agent(df, user_query):
+    llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
+    tool = Tool(name="pandas_agent", description="Use Python to analyze the table", func=PythonREPLTool().run)
+    prompt = PromptTemplate.from_template("""You are a pandas expert with a DataFrame df. Use code to answer:\n\nQuestion: {input}""")
+    agent = create_react_agent(llm, tools=[tool], prompt=prompt)
+    executor = AgentExecutor(agent=agent, tools=[tool], verbose=False)
+
+    context = f"import pandas as pd\ndf = pd.DataFrame({df.to_dict(orient='list')})"
+    try:
+        result = executor.invoke({"input": f"{context}\n\n{user_query}"})
+        return result["output"]
+    except Exception as e:
+        return f"Agent error: {e}"
+
+# --- Chat Handler ---
+if query := st.chat_input("Ask a question..."):
     st.session_state.msgs.append({"role": "user", "content": query})
     with st.chat_message("user"):
         st.markdown(query)
 
-    table = fuzzy_match_table(query)
-    if table:
+    matched_table = fuzzy_match_table(query)
+    if matched_table:
         with st.chat_message("assistant"):
-            with st.spinner(f"Using table: {table['table_title']}"):
-                result = run_pandas_agent(table["data"], query)
-                st.markdown(f"*Matched Table:* {table['table_title']}\n\n{result}")
-                st.session_state.msgs.append({"role": "assistant", "content": result})
+            with st.spinner(f"Using table: {matched_table['table_title']}"):
+                response = run_pandas_agent(matched_table["data"], query)
+                st.markdown(f"*Matched Table:* {matched_table['table_title']}\n\n{response}")
+                st.session_state.msgs.append({"role": "assistant", "content": response})
     elif st.session_state.vs:
         with st.chat_message("assistant"):
-            with st.spinner("Searching documents..."):
+            with st.spinner("Searching all documents..."):
                 results = st.session_state.vs.similarity_search_with_score(query, k=6)
-                top_chunks = [f"[Source: {doc.metadata.get('source', 'unknown')}]\n{doc.page_content}"
-                              for doc, _ in sorted(results, key=lambda x: x[1])]
+                top_chunks = [
+                    f"[Source: {doc.metadata.get('source', 'unknown')}]\n{doc.page_content}"
+                    for doc, score in sorted(results, key=lambda x: x[1])[:5]
+                ]
                 context = "\n\n".join(top_chunks)
+                sub_questions = [q.strip() for q in query.replace("&", " and ").split(" and ") if q.strip()]
+                responses = []
                 llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
-                sub_qs = [q.strip() for q in query.replace("&", " and ").split(" and ") if q.strip()]
-                answers = []
-                for sq in sub_qs:
-                    prompt = f"""You are an assistant. Use ONLY the context below.
-
-Context:
-{context}
-
-Question: {sq}
-Answer:"""
-                    resp = llm.invoke(prompt).strip()
-                    answers.append(f"*Q: {sq}*\n{resp}")
-                final = "\n\n".join(answers)
+                for sq in sub_questions:
+                    prompt = f"""Use ONLY the context below to answer:\n\nContext:\n{context}\n\nQuestion: {sq}\n\nAnswer:"""
+                    resp = llm.invoke(prompt)
+                    responses.append(f"*Q: {sq}*\n{resp.strip()}")
+                final = "\n\n".join(responses)
                 st.markdown(final)
                 st.session_state.msgs.append({"role": "assistant", "content": final})
     else:
