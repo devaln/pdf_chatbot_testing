@@ -1,16 +1,11 @@
 # --- Imports ---
-import os
-import tempfile
-import shutil
-import logging
+import os, tempfile, shutil, logging
 import streamlit as st
 import pandas as pd
 import numpy as np
 from PIL import Image
 import fitz  # PyMuPDF
-import pdfplumber
-import camelot
-import pytesseract
+import pdfplumber, camelot, pytesseract
 from pdf2image import convert_from_path
 from difflib import SequenceMatcher
 
@@ -27,10 +22,9 @@ from langchain_core.runnables import RunnablePassthrough
 # --- Config ---
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_LLM_MODEL = "llama3:latest"  # or llama4:latest
+OLLAMA_LLM_MODEL = "llama3:latest"  # or "llama4:latest"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
-CHAT_DIR = "./chat_sessions"
 
 logging.basicConfig(level=logging.INFO, filename="app.log", format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -46,13 +40,11 @@ def headers_similar(h1, h2, threshold=0.8):
     return SequenceMatcher(None, ",".join(h1), ",".join(h2)).ratio() > threshold
 
 def extract_tables_pdfplumber(pdf_path):
-    dfs = []
+    dfs, last_df = [], None
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            last_df = None
             for page in pdf.pages:
-                tables = page.extract_tables()
-                for table in tables:
+                for table in page.extract_tables():
                     if table:
                         df = pd.DataFrame(table[1:], columns=table[0])
                         df = clean_df(df)
@@ -92,24 +84,17 @@ def extract_scanned_pdf_with_ocr(pdf_path):
             ocr_data = ocr_data[ocr_data['conf'].astype(int) > 40]
 
             grouped = ocr_data.groupby(['block_num', 'par_num', 'line_num'])
-            rows = []
-            for _, group in grouped:
-                line = group.sort_values("left")["text"].tolist()
-                rows.append(line)
-
+            rows = [group.sort_values("left")["text"].tolist() for _, group in grouped]
             if not rows:
                 continue
 
-            max_cols = max(len(row) for row in rows)
-            padded = [row + [""] * (max_cols - len(row)) for row in rows]
-            df_raw = pd.DataFrame(padded)
-
-            df_raw = df_raw.replace("", pd.NA).dropna(how="all").fillna("")
+            max_cols = max(len(r) for r in rows)
+            padded = [r + [""] * (max_cols - len(r)) for r in rows]
+            df_raw = pd.DataFrame(padded).replace("", pd.NA).dropna(how="all").fillna("")
             header_row_idx = df_raw.apply(lambda row: row.str.len().gt(1).sum(), axis=1).idxmax()
             headers = df_raw.iloc[header_row_idx].tolist()
             headers = [h if h.strip() else "column" for h in headers]
             headers = pd.io.parsers.ParserBase({'names': headers})._maybe_dedup_names(headers)
-
             df_data = df_raw.iloc[header_row_idx + 1:].reset_index(drop=True)
             df_data.columns = headers
             full_dfs.append(df_data)
@@ -117,8 +102,7 @@ def extract_scanned_pdf_with_ocr(pdf_path):
         if not full_dfs:
             return "", ""
 
-        stitched = []
-        last_df = None
+        stitched, last_df = [], None
         for df in full_dfs:
             if last_df is not None and headers_similar(last_df.columns.tolist(), df.columns.tolist()):
                 last_df = pd.concat([last_df, df], ignore_index=True)
@@ -130,8 +114,7 @@ def extract_scanned_pdf_with_ocr(pdf_path):
             stitched.append(last_df)
 
         combined = pd.concat(stitched).reset_index(drop=True)
-        csv_text = combined.to_csv(index=False)
-        return csv_text, combined.to_string(index=False)
+        return combined.to_csv(index=False), combined.to_string(index=False)
     except Exception as e:
         logging.error(f"OCR failed: {e}")
         return "", ""
@@ -143,15 +126,14 @@ def extract_all_tables(pdf_path, scanned_mode=False):
     dfs = extract_tables_pdfplumber(pdf_path)
     dfs += extract_tables_camelot(pdf_path)
 
-    full_text = ""
     try:
         doc = fitz.open(pdf_path)
         full_text = "\n".join([page.get_text() for page in doc])
     except Exception as e:
         logging.error(f"Text extraction failed: {e}")
+        full_text = ""
 
-    all_tables = [df.to_csv(index=False) for df in dfs]
-    return "\n\n".join(all_tables), full_text
+    return "\n\n".join(df.to_csv(index=False) for df in dfs), full_text
 
 @st.cache_resource(show_spinner=False)
 def load_and_index(files, scanned_mode=False):
@@ -165,20 +147,17 @@ def load_and_index(files, scanned_mode=False):
                 loader = PyPDFLoader(path)
                 all_docs.extend(loader.load())
                 tables_text, full_text = extract_all_tables(path, scanned_mode)
-                all_docs.append(Document(page_content=tables_text + "\n" + full_text, metadata={"source": file.name}))
+                if tables_text.strip() or full_text.strip():
+                    all_docs.append(Document(page_content=tables_text + "\n" + full_text, metadata={"source": file.name}))
             except Exception as e:
-                logging.error(f"Failed: {e}")
-                st.error(f"Failed: {e}")
+                st.error(f"❌ {file.name}: Failed to process: {e}")
+                logging.error(f"{file.name} failed: {e}")
 
     if not all_docs:
         return None
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = []
-    for doc in all_docs:
-        for chunk in splitter.split_documents([doc]):
-            chunk.metadata["source"] = doc.metadata.get("source", "unknown")
-            chunks.append(chunk)
+    chunks = [chunk for doc in all_docs for chunk in splitter.split_documents([doc])]
 
     try:
         embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
@@ -188,13 +167,12 @@ def load_and_index(files, scanned_mode=False):
         else:
             vs = FAISS.from_documents(chunks, embed)
         vs.save_local(DB_DIR)
-        st.success("✅ Index built.")
         return vs
     except Exception as e:
         logging.error(f"Indexing error: {e}")
         return None
 
-# --- TopK Filter Retriever (fixed, callable version) ---
+# --- Top-K Retriever ---
 class TopKFilterRetriever:
     def _init_(self, retriever, top_k=8):
         self.retriever = retriever
@@ -208,30 +186,33 @@ class TopKFilterRetriever:
         for doc in docs:
             grouped.setdefault(doc.metadata.get("source", "unknown"), []).append(doc)
         top_source = max(grouped.items(), key=lambda x: len(x[1]))[0]
-        top_docs = grouped[top_source]
-        return "\n\n".join([doc.page_content for doc in top_docs])
+        return "\n\n".join([d.page_content for d in grouped[top_source]])
 
 def get_chat_chain(vs):
     retriever = vs.as_retriever(search_kwargs={"k": 10})
-    filtered_retriever = TopKFilterRetriever(retriever)
-    prompt = ChatPromptTemplate.from_template(
-        "You are a table analysis expert.\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:"
-    )
+    filtered = TopKFilterRetriever(retriever)
+    prompt = ChatPromptTemplate.from_template("You are a table analysis expert.\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:")
     llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
-    return {"context": filtered_retriever, "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
+    return {"context": filtered, "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
 
 # --- UI ---
 st.sidebar.image("img/ACL_Digital.png", width=180)
 st.sidebar.image("img/Cipla_Foundation.png", width=180)
-st.sidebar.markdown(""" <hr> """, unsafe_allow_html=True)
+st.sidebar.markdown("<hr>", unsafe_allow_html=True)
 st.sidebar.header("📂 Upload PDFs")
 uploaded = st.sidebar.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
 scanned_mode = st.sidebar.checkbox("📸 Scanned PDF (image only)?")
 
 if st.sidebar.button("📊 Extract & Index"):
     if uploaded:
-        st.session_state.vs = load_and_index(uploaded, scanned_mode)
-        st.session_state.msgs = [{"role": "assistant", "content": "✅ You can now ask questions!"}]
+        with st.spinner("Indexing..."):
+            vs_result = load_and_index(uploaded, scanned_mode)
+            if vs_result:
+                st.session_state.vs = vs_result
+                st.session_state.msgs = [{"role": "assistant", "content": "✅ You can now ask questions!"}]
+                st.success("✅ Documents indexed.")
+            else:
+                st.error("❌ Indexing failed. No text or tables found.")
 
 if st.sidebar.button("🧹 Clear Chat"):
     st.session_state.msgs = []
@@ -241,7 +222,7 @@ if st.sidebar.button("🗑 Clear DB"):
     if os.path.exists(DB_DIR):
         shutil.rmtree(DB_DIR)
     st.session_state.vs = None
-    st.success("Database cleared.")
+    st.success("Vector store deleted.")
 
 if "vs" not in st.session_state:
     st.session_state.vs = None
@@ -256,7 +237,6 @@ if query := st.chat_input("Ask your question..."):
     st.session_state.msgs.append({"role": "user", "content": query})
     with st.chat_message("user"):
         st.markdown(query)
-
     if st.session_state.vs:
         chain = get_chat_chain(st.session_state.vs)
         with st.chat_message("assistant"):
@@ -265,4 +245,4 @@ if query := st.chat_input("Ask your question..."):
                 st.markdown(response)
                 st.session_state.msgs.append({"role": "assistant", "content": response})
     else:
-        st.error("Upload and index documents first.")
+        st.error("❌ Upload and index documents first.")
