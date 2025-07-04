@@ -36,7 +36,6 @@ logging.basicConfig(level=logging.INFO, filename="app.log", format="%(asctime)s 
 st.set_page_config(page_title="PDF QA with Tables", layout="wide")
 st.title("📄 PDF Text & Table Extractor + Chat QA")
 
-# --- Styles ---
 st.markdown("""
     <style>
         section[data-testid="stSidebar"] {
@@ -64,7 +63,7 @@ def extract_tables_pdfplumber(pdf_path):
                         df = pd.DataFrame(table[1:], columns=table[0])
                         df = clean_df(df)
 
-                        # Try to detect table name: find matching header in page text and get line above
+                        # Detect table title from line above header
                         title = ""
                         for i, line in enumerate(page_text_lines):
                             if all(col.strip() in line for col in table[0] if col):
@@ -148,21 +147,23 @@ def extract_all_tables(pdf_path, scanned_mode=False):
     except Exception as e:
         logging.error(f"Text extraction failed: {e}")
 
-    return "\n\n".join(dfs), full_text  # dfs contains table blocks with title + CSV
+    return "\n\n".join(dfs), full_text
 
-# 🔧 FAISS Load without caching (to avoid Pickle issue)
+# ✅ Safe FAISS loader (not cached)
+def load_existing_index():
+    if not os.path.exists(os.path.join(DB_DIR, "index.faiss")):
+        return None
+    try:
+        embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
+        return FAISS.load_local(DB_DIR, embed, allow_dangerous_deserialization=True)
+    except Exception as e:
+        logging.error(f"Failed to load FAISS index: {e}")
+        return None
+
 def load_and_index(files, scanned_mode=False):
-    # Embedder for all cases
     embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
 
-    # Load previous index if exists
-    if os.path.exists(os.path.join(DB_DIR, "index.faiss")):
-        vs = FAISS.load_local(DB_DIR, embed)
-    else:
-        vs = None
-
-    # Process new files
-    new_docs = []
+    all_docs = []
     with tempfile.TemporaryDirectory() as td:
         for file in files:
             path = os.path.join(td, file.name)
@@ -170,20 +171,20 @@ def load_and_index(files, scanned_mode=False):
                 f.write(file.getbuffer())
             try:
                 loader = PyPDFLoader(path)
-                new_docs.extend(loader.load())
+                all_docs.extend(loader.load())
                 tables_text, full_text = extract_all_tables(path, scanned_mode)
-                new_docs.append(Document(page_content=tables_text + "\n" + full_text, metadata={"source": file.name}))
+                all_docs.append(Document(page_content=tables_text + "\n" + full_text, metadata={"source": file.name}))
             except Exception as e:
-                st.error(f"Failed to process {file.name}: {e}")
+                logging.error(f"Failed to extract: {e}")
+                st.error(f"Failed to extract: {e}")
 
-    if not new_docs:
-        return vs  # Return existing (if any)
+    if not all_docs:
+        return st.session_state.get("vs", None)
 
-    # Split new documents
-    chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(new_docs)
+    chunks = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200).split_documents(all_docs)
 
-    # Create or update FAISS index
-    if vs:
+    if "vs" in st.session_state and st.session_state.vs:
+        vs = st.session_state.vs
         vs.add_documents(chunks)
     else:
         vs = FAISS.from_documents(chunks, embed)
@@ -208,7 +209,8 @@ scanned_mode = st.sidebar.checkbox("📸 Scanned PDF (image only)?")
 
 if st.sidebar.button("📊 Extract & Index"):
     if uploaded:
-        st.session_state.vs = load_and_index(uploaded, scanned_mode)
+        with st.spinner("Indexing..."):
+            st.session_state.vs = load_and_index(uploaded, scanned_mode)
         st.session_state.msgs = [{"role": "assistant", "content": "✅ You can now ask questions!"}]
 
 if st.sidebar.button("🧹 Clear Chat"):
@@ -221,12 +223,13 @@ if st.sidebar.button("🗑 Clear DB"):
     st.session_state.vs = None
     st.success("Database cleared.")
 
+# --- Session State Init ---
 if "vs" not in st.session_state:
-    st.session_state.vs = None
-
+    st.session_state.vs = load_existing_index()
 if "msgs" not in st.session_state:
     st.session_state.msgs = []
 
+# --- Chat Interface ---
 for msg in st.session_state.msgs:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
