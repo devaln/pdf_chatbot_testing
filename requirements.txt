@@ -17,3 +17,4 @@ langchain-community
 langchain-core
 langchain-experimental
 llama-index
+matplotlib
