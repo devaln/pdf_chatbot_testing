@@ -1,4 +1,3 @@
-# --- Imports ---
 import os
 import tempfile
 import shutil
@@ -10,7 +9,6 @@ import numpy as np
 from PIL import Image
 import fitz  # PyMuPDF
 import pdfplumber
-import camelot
 import pytesseract
 from pdf2image import convert_from_path
 from fuzzywuzzy import fuzz
@@ -27,7 +25,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # --- Config ---
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_LLM_MODEL = "llama3"
+OLLAMA_LLM_MODEL = "llama4:latest"
 OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DB_DIR = "./faiss_db"
 
@@ -201,7 +199,6 @@ def fuzzy_match_table(query):
             best_table = table
     return best_table if best_score >= 70 else None
 
-# --- Agent Logic ---
 def run_pandas_agent(df, user_query):
     llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
     tool = Tool(name="pandas_agent", description="Execute Python code to analyze a table", func=PythonREPLTool().run)
@@ -213,7 +210,6 @@ Question: {input}
 """)
     agent = create_react_agent(llm, tools=[tool], prompt=prompt)
     executor = AgentExecutor(agent=agent, tools=[tool], verbose=False)
-
     context = f"import pandas as pd\ndf = pd.DataFrame({df.to_dict(orient='list')})"
     try:
         result = executor.invoke({"input": f"{context}\n\n{user_query}"})
@@ -222,11 +218,11 @@ Question: {input}
         return f"Agent error: {e}"
 
 # --- Sidebar UI ---
-st.sidebar.header("📂 Upload PDFs")
+st.sidebar.header("\U0001F4C2 Upload PDFs")
 uploaded = st.sidebar.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True, key=st.session_state.uploader_key)
-scanned_mode = st.sidebar.checkbox("📸 Is Scanned PDF?", value=False)
+scanned_mode = st.sidebar.checkbox("\U0001F4F8 Is Scanned PDF?", value=False)
 
-if st.sidebar.button("📊 Extract & Index"):
+if st.sidebar.button("\U0001F4CA Extract & Index"):
     if uploaded:
         with st.spinner("Indexing documents..."):
             load_and_index(uploaded, scanned=scanned_mode)
@@ -234,9 +230,9 @@ if st.sidebar.button("📊 Extract & Index"):
             st.session_state.uploader_key += 1
             st.session_state.msgs = [{"role": "assistant", "content": "Ask about any table or row!"}]
 
-if st.sidebar.button("🧹 Clear Chat"):
+if st.sidebar.button("\U0001F9F9 Clear Chat"):
     st.session_state.msgs = []
-if st.sidebar.button("🗑 Clear DB"):
+if st.sidebar.button("\U0001F5D1 Clear DB"):
     shutil.rmtree(DB_DIR, ignore_errors=True)
     st.session_state.vs = None
     st.session_state.tables = []
