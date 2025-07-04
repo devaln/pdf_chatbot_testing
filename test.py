@@ -16,7 +16,8 @@ from fuzzywuzzy import fuzz
 from langchain.agents import Tool, AgentExecutor, create_react_agent
 from langchain_community.chat_models import ChatOllama
 from langchain_core.prompts import PromptTemplate
-from langchain.tools.python.tool import PythonREPLTool
+from langchain.tools.python import PythonREPLTool
+# from langchain.tools.python.tool import PythonREPLTool
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
