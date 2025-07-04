@@ -16,12 +16,12 @@ fuzzywuzzy
 python-Levenshtein
 
 # LangChain + Ollama
-langchain
+langchain>=0.1.16
 langchain-community
 langchain-core
 langchain-text-splitters
 langchainhub
-langchain-experimental
+langchain-experimental>=0.0.52
 
 # Embeddings & Vector Store
 faiss-cpu
