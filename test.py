@@ -72,7 +72,9 @@ def clean_df(df):
 def df_to_text(df, title=None):
     rows = [f"{title or ''}".strip()]
     for _, row in df.iterrows():
-        row_str = " | ".join(f"{col.strip()}: {str(val).strip()}" for col, val in row.items())
+        row_str = " | ".join(
+            f"{(col or '').strip()}: {str(val).strip()}" for col, val in row.items()
+        )
         rows.append(row_str)
     return "\n".join(rows)
 
@@ -166,8 +168,7 @@ def extract_all_tables(path, scanned):
     if scanned:
         dfs = extract_scanned_table(path)
         return [(df, "") for df in dfs]
-    tables = extract_tables_pdf(path)
-    return tables
+    return extract_tables_pdf(path)
 
 def load_and_index(files, scanned=False):
     embed = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
@@ -273,9 +274,11 @@ if query := st.chat_input("Ask a question..."):
         with st.chat_message("assistant"):
             with st.spinner("Searching documents..."):
                 results = st.session_state.vs.similarity_search_with_score(query, k=6)
-                top_chunks = [f"[Source: {doc.metadata.get('source', 'unknown')}]\n{doc.page_content}" for doc, score in sorted(results, key=lambda x: x[1])[:5]]
+                top_chunks = [
+                    f"[Source: {doc.metadata.get('source', 'unknown')}]\n{doc.page_content}"
+                    for doc, score in sorted(results, key=lambda x: x[1])[:5]
+                ]
                 context = "\n\n".join(top_chunks)
-
                 sub_questions = [q.strip() for q in query.replace("&", " and ").split(" and ") if q.strip()]
                 responses = []
                 llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL)
@@ -292,7 +295,6 @@ Answer in bullet points or structured format.
 """
                     resp = llm.invoke(prompt)
                     responses.append(f"*Q: {q}*\n{resp.strip()}")
-
                 final_response = "\n\n".join(responses)
                 st.markdown(final_response)
                 st.session_state.msgs.append({"role": "assistant", "content": final_response})
