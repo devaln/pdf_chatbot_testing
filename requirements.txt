@@ -1,16 +1,16 @@
 # Streamlit UI
-streamlit>=1.30.0
+streamlit
 
 # Core Python Data/Utility Libraries
-pandas>=1.5.3
-numpy>=1.23.5
-Pillow>=9.5.0
-requests>=2.31.0
+pandas
+numpy
+Pillow
+requests
 
 # PDF Parsing & Image Conversion
-PyMuPDF>=1.22.0        # for 'fitz'
-pdfplumber>=0.10.2
-pdf2image>=1.16.3
+PyMuPDF
+pdfplumber
+pdf2image
 
 # Table Extraction
 camelot-py[cv]
@@ -27,12 +27,12 @@ langchain-community
 ollama
 
 # FAISS with GPU Support
-faiss
+faiss-cpu
 
 # GPU-Accelerated Deep Learning (Torch + CUDA 11.8)
-torch==2.1.2+cu118
-torchvision==0.16.2+cu118
-torchaudio==2.1.2+cu118
+torch
+torchvision
+torchaudio
 --find-links https://download.pytorch.org/whl/torch_stable.html
 
 # Logging & Utilities
