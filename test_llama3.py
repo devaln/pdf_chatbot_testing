@@ -30,6 +30,7 @@ TOP_K = 5
 # --- Embedding Wrapper ---
 class HuggingFaceEmbedder:
     def _init_(self):
+        from sentence_transformers import SentenceTransformer
         self.model = SentenceTransformer("intfloat/e5-large-v2")
 
     def embed_documents(self, texts):
