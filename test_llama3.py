@@ -23,14 +23,14 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_LLM_MODEL = "llama3:latest"
 HF_EMBED_MODEL = "intfloat/e5-base"
 DB_DIR = "./faiss_db"
-TOP_K = 5
+TOP_K = 2
 
 # --- Embeddings ---
 embedder = HuggingFaceEmbeddings(model_name=HF_EMBED_MODEL)
 
 # --- Streamlit UI ---
-st.set_page_config(page_title="PDF QA (Scanned Tables)", layout="wide")
-st.title("\ud83d\udcc4 PDF Q&A (Scanned Tables)")
+st.set_page_config(page_title="PDF QA", layout="wide")
+st.title("PDF Q&A (Scanned Tables)")
 st.markdown("Ask questions like: 'What is the target for home visits?' or combine multiple queries with 'and', 'then'...")
 
 # --- Session ---
@@ -135,6 +135,7 @@ def process_and_index(files):
         vs = FAISS.from_documents(docs, embedder)
 
     vs.save_local(DB_DIR)
+    shutil.rmtree("temp", ignore_errors=True)
     return vs
 
 # --- LLM Chain ---
@@ -159,14 +160,14 @@ def get_chain(vs):
 
 # --- Sidebar UI ---
 with st.sidebar:
-    st.header("\ud83d\udcc2 Upload Scanned PDFs")
+    st.header("Upload Scanned PDFs")
     uploader = st.file_uploader("Upload scanned PDF(s)", type="pdf", accept_multiple_files=True)
     if uploader:
         st.session_state.uploaded_files = uploader
         for f in uploader:
             st.markdown(f"\u2705 {f.name}")
 
-    if st.button("\ud83d\udcc4 Extract & Index"):
+    if st.button("Extract & Index"):
         if st.session_state.uploaded_files:
             with st.spinner("Extracting tables and indexing..."):
                 vs = process_and_index(st.session_state.uploaded_files)
@@ -178,10 +179,10 @@ with st.sidebar:
         else:
             st.warning("Please upload PDFs first.")
 
-    if st.button("\ud83e\ude91 Clear Chat"):
+    if st.button("Clear Chat"):
         st.session_state.msgs = []
 
-    if st.button("\ud83d\uddd1\ufe0f Clear FAISS Index"):
+    if st.button("Clear FAISS Index"):
         shutil.rmtree(DB_DIR, ignore_errors=True)
         st.session_state.vs = None
         st.success("\ud83d\uddd1\ufe0f FAISS index deleted.")
@@ -195,7 +196,7 @@ def smart_split(query):
     return [q.strip() for q in re.split(r'\b(?:and|or|then|next|also|after that|followed by|&|\n)\b', query, flags=re.IGNORECASE) if q.strip()]
 
 # --- Chat UI ---
-st.markdown("### \ud83d\udcac Ask your question")
+st.markdown("### Ask your question")
 query = st.chat_input("Ask questions (e.g. 'target and number trained')")
 
 if query:
@@ -222,7 +223,7 @@ if query:
 
                 final_result = "\n\n---\n\n".join(responses)
             except Exception as e:
-                final_result = f"\u26a0\ufe0f Critical Error: {e}"
+                final_result = f" Critical Error: {e}"
 
             st.session_state.msgs.append({"role": "assistant", "content": final_result})
 
