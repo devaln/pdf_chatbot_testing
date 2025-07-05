@@ -1,11 +1,12 @@
 streamlit>=1.30.0
 pandas>=1.5.3
-fuzzywuzzy
-python-Levenshtein
-sentence-transformers
 docling>=0.1.36
 langchain>=0.1.14
-langchain-community>=0.0.20
-faiss-cpu  # or faiss-gpu if you're using a GPU
-openai  # required by some langchain internals
-pandasql
+langchain-community>=0.0.26
+langchain-docling>=0.1.3
+sentence-transformers
+faiss-cpu
+openai
+pydantic>=2.0
+python-Levenshtein
+huggingface-hub
