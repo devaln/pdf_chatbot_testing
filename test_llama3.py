@@ -58,7 +58,11 @@ def load_and_index(files):
             loader = DoclingLoader(
                 file_path=temp_path,
                 export_type=ExportType.DOC_CHUNKS,
-                chunker=HybridChunker(tokenizer="intfloat/e5-base")
+                chunker=HybridChunker(
+                    tokenizer="intfloat/e5-base",
+                    preserve_table_blocks=True,
+                    max_tokens=1024
+                )
             )
 
             try:
