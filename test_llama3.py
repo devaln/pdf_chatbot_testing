@@ -16,6 +16,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from pathlib import Path
+import re
 
 # --- Config ---
 OLLAMA_BASE_URL = "http://localhost:11434"
@@ -29,8 +30,8 @@ embedder = HuggingFaceEmbeddings(model_name=HF_EMBED_MODEL)
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="PDF QA (Scanned Tables)", layout="wide")
-st.title("📄 PDF Q&A (Scanned Tables)")
-st.markdown("Ask questions like: 'What is the target for home visits?'")
+st.title("\ud83d\udcc4 PDF Q&A (Scanned Tables)")
+st.markdown("Ask questions like: 'What is the target for home visits?' or combine multiple queries with 'and', 'then'...")
 
 # --- Session ---
 if "msgs" not in st.session_state:
@@ -60,9 +61,9 @@ def extract_tables_from_pdf(pdf_path):
     for page_num, img in enumerate(images):
         ocr_df = pytesseract.image_to_data(img, output_type=pytesseract.Output.DATAFRAME)
 
-        # ✅ Ensure 'text' column exists and convert to string
         if "text" not in ocr_df.columns:
             continue
+
         ocr_df["text"] = ocr_df["text"].astype(str)
         ocr_df = ocr_df[ocr_df["text"].str.strip() != ""]
 
@@ -73,7 +74,6 @@ def extract_tables_from_pdf(pdf_path):
             except:
                 continue
 
-        # Group lines by similar 'top' position (i.e., same row)
         grouped = {}
         for top, word in lines:
             found = False
@@ -87,18 +87,21 @@ def extract_tables_from_pdf(pdf_path):
 
         table_rows = list(grouped.values())
         if len(table_rows) < 2:
-            continue  # Skip if not enough rows for a table
+            continue
 
         headers = table_rows[0]
         rows = table_rows[1:]
 
         if not headers or not rows:
-            continue  # Skip tables with no meaningful data
+            continue
+
+        clean_rows = [r for r in rows if len(r) == len(headers)]
+        if not clean_rows:
+            continue
 
         table_json = {
-            "title": "Operational Achievement",
             "headers": headers,
-            "rows": rows
+            "rows": clean_rows
         }
 
         table_id = str(uuid.uuid4())
@@ -106,9 +109,9 @@ def extract_tables_from_pdf(pdf_path):
         with open(table_path, "w", encoding="utf-8") as f:
             json.dump(table_json, f, indent=2)
 
-        formatted_rows = "\n".join([", ".join(r) for r in rows])
-        chunk_text = f"Table Title: Operational Achievement\nHeaders: {', '.join(headers)}\nRows:\n{formatted_rows}"
-        all_chunks.append(Document(page_content=chunk_text, metadata={"table_title": "Operational Achievement"}))
+        formatted_rows = "\n".join([", ".join(r) for r in clean_rows])
+        chunk_text = f"Headers: {', '.join(headers)}\nRows:\n{formatted_rows}"
+        all_chunks.append(Document(page_content=chunk_text))
 
     return all_chunks
 
@@ -140,9 +143,9 @@ def get_chain(vs):
     prompt = ChatPromptTemplate.from_template(
         """
         You are a smart table extraction assistant.
-        - If user asks about a table, return its contents.
-        - If user asks about a specific row or column, extract and return only relevant values.
-        - Always use only the context provided below.
+        - Return well-structured answers in markdown.
+        - Use bullet points or tables if needed.
+        - Provide only the relevant information.
 
         Context:
         {context}
@@ -156,58 +159,74 @@ def get_chain(vs):
 
 # --- Sidebar UI ---
 with st.sidebar:
-    st.header("📂 Upload Scanned PDFs")
+    st.header("\ud83d\udcc2 Upload Scanned PDFs")
     uploader = st.file_uploader("Upload scanned PDF(s)", type="pdf", accept_multiple_files=True)
     if uploader:
         st.session_state.uploaded_files = uploader
         for f in uploader:
-            st.markdown(f"✅ {f.name}")
+            st.markdown(f"\u2705 {f.name}")
 
-    if st.button("📄 Extract & Index"):
+    if st.button("\ud83d\udcc4 Extract & Index"):
         if st.session_state.uploaded_files:
             with st.spinner("Extracting tables and indexing..."):
                 vs = process_and_index(st.session_state.uploaded_files)
                 if vs:
                     st.session_state.vs = vs
                     st.session_state.msgs = []
-                    st.success("✅ Indexing complete!")
-                    # ✅ Clear uploaded files from sidebar
+                    st.success("\u2705 Indexing complete!")
                     st.session_state.uploaded_files = []
         else:
             st.warning("Please upload PDFs first.")
 
-    if st.button("🧹 Clear Chat"):
+    if st.button("\ud83e\ude91 Clear Chat"):
         st.session_state.msgs = []
 
-    if st.button("🗑 Clear FAISS Index"):
+    if st.button("\ud83d\uddd1\ufe0f Clear FAISS Index"):
         shutil.rmtree(DB_DIR, ignore_errors=True)
         st.session_state.vs = None
-        st.success("🗑 FAISS index deleted.")
+        st.success("\ud83d\uddd1\ufe0f FAISS index deleted.")
 
 # --- Load existing index if available ---
 if st.session_state.vs is None:
     st.session_state.vs = load_existing_index()
 
+# --- Smart Split ---
+def smart_split(query):
+    return [q.strip() for q in re.split(r'\b(?:and|or|then|next|also|after that|followed by|&|\n)\b', query, flags=re.IGNORECASE) if q.strip()]
+
 # --- Chat UI ---
-st.markdown("### 💬 Ask your question")
-query = st.chat_input("E.g. 'Target for home visit' or 'Provide operational achievement'")
+st.markdown("### \ud83d\udcac Ask your question")
+query = st.chat_input("Ask questions (e.g. 'target and number trained')")
 
 if query:
     if not st.session_state.vs:
         st.error("Please upload and index PDFs first.")
     else:
+        sub_queries = smart_split(query)
         st.session_state.msgs.append({"role": "user", "content": query})
-        with st.spinner("Thinking..."):
+
+        with st.spinner("Thinking through your multi-part query..."):
             try:
                 chain = get_chain(st.session_state.vs)
-                result = chain.invoke(query)
-                if not result or len(result.strip()) < 2:
-                    result = "⚠ No relevant data found."
+                responses = []
+
+                for idx, sub_q in enumerate(sub_queries):
+                    try:
+                        result = chain.invoke(sub_q)
+                        if result and result.strip():
+                            responses.append(f"### Q{idx+1}: {sub_q}\n\n{result.strip()}")
+                        else:
+                            responses.append(f"### Q{idx+1}: {sub_q}\n\n\u26a0\ufe0f No relevant data found.")
+                    except Exception as sub_e:
+                        responses.append(f"### Q{idx+1}: {sub_q}\n\n\u26a0\ufe0f Error: {sub_e}")
+
+                final_result = "\n\n---\n\n".join(responses)
             except Exception as e:
-                result = f"⚠ Error: {e}"
-            st.session_state.msgs.append({"role": "assistant", "content": result})
+                final_result = f"\u26a0\ufe0f Critical Error: {e}"
+
+            st.session_state.msgs.append({"role": "assistant", "content": final_result})
 
 # --- Display Chat ---
 for msg in st.session_state.msgs:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        st.markdown(msg["content"], unsafe_allow_html=True)
