@@ -63,7 +63,7 @@ def process_and_index(files):
         loader = DoclingLoader(
             file_path=temp_path,
             export_type=ExportType.DOC_CHUNKS,
-            chunker=HybridChunker(tokenizer=OLLAMA_EMBED_MODEL, mode="table-first")
+            chunker=HybridChunker(tokenizer="nomic-embed-text", mode="table_first")
         )
         try:
             docs.extend(loader.load())
