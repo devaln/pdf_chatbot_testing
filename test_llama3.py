@@ -53,7 +53,7 @@ def index_with_docling(files):
         loader = DoclingLoader(
             file_path=temp_path,
             export_type="DOC_CHUNKS",
-            chunker=HybridChunker(tokenizer=OLLAMA_EMBED_MODEL),
+            chunker=HybridChunker(tokenizer="intfloat/e5-base"),
         )
         d = loader.load()
         docs.extend(d)
