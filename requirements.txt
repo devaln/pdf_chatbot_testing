@@ -1,16 +1,28 @@
-streamlit
-pandas
-numpy
-pytesseract
-pdf2image
-pdfplumber
-camelot-py[cv]
-PyMuPDF
-Pillow
-requests
-langchain
-langchain-community
-faiss-cpu
-tqdm
-python-dotenv
-openpyxl
+# Streamlit for the web app UI
+streamlit>=1.30.0
+
+# LangChain for retrieval-augmented generation pipeline
+langchain>=0.1.14
+langchain-core>=0.1.50
+langchain-community>=0.0.25
+
+# FAISS for vector storage
+faiss-cpu  # use faiss-gpu if running on a GPU-enabled server
+
+# Ollama-compatible chat model
+openai  # required internally by some LangChain features
+
+# Docling for advanced PDF extraction (tables + text)
+docling>=0.1.36
+langchain-docling>=0.1.4
+
+# Embedding model from HuggingFace
+sentence-transformers>=2.2.2  # required by HuggingFaceEmbeddings
+transformers>=4.30.0
+torch>=1.13.0  # required for transformers if not already installed
+
+# Utility packages
+pandas>=1.5.3
+uuid
+pathlib
+shutil
