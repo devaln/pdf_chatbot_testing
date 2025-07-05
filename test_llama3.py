@@ -67,6 +67,16 @@ def load_and_index(files):
 
             try:
                 docs = loader.load()
+                for d in docs:
+                    if "table_title" in d.metadata and "rows" in d.metadata:
+                        title = d.metadata["table_title"]
+                        try:
+                            df = pd.DataFrame(d.metadata["rows"], columns=d.metadata.get("headers"))
+                            df.columns = df.columns.str.strip().str.lower()  # Clean column names
+                            st.session_state.table_store.append({"title": title, "df": df})
+                        except Exception as e:
+                            st.warning(f"⚠ Failed to build table from metadata: {e}")
+                    d.metadata["source"] = os.path.basename(temp_path)
                 all_docs.extend(docs)
             except Exception as e:
                 st.error(f"Failed to load {file.name}: {e}")
@@ -117,9 +127,10 @@ def fuzzy_match_table(query):
             best = {"score": score, "title": t["title"], "df": t["df"]}
     return best if best["score"] >= 70 else None
 
-# --- Pandas Agent ---
+# --- Pandas Agent with LLM Fallback ---
 def run_pandas_agent(df, query):
     try:
+        df.columns = df.columns.str.strip().str.lower()  # Normalize columns
         query_lower = query.lower()
         if "total" in query_lower or "sum" in query_lower:
             return df.sum(numeric_only=True).to_frame("Total")
@@ -136,7 +147,13 @@ def run_pandas_agent(df, query):
         else:
             return df.head()
     except Exception as e:
-        return f"\u274c Pandas agent failed: {e}"
+        st.warning(f"Pandas agent failed, switching to LLM: {e}")
+        # Format the table and ask LLM
+        table_preview = df.to_markdown(index=False)
+        llm_prompt = ChatPromptTemplate.from_template(
+            "You are a smart data assistant. Here's a table:\n\n{table}\n\nNow answer this question using the table only:\n{question}\n\nAnswer:")
+        llm_chain = llm_prompt | ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL) | StrOutputParser()
+        return llm_chain.invoke({"table": table_preview, "question": query})
 
 # --- DB Clear ---
 def clear_db():
