@@ -23,7 +23,9 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_LLM_MODEL = "llama3:latest"
 HF_EMBED_MODEL = "intfloat/e5-base"
 DB_DIR = "./faiss_db"
-TOP_K = 2
+TOP_K = 5
+ROW_CHUNK_SIZE = 10
+TEXT_CHUNK_SIZE = 500
 
 # --- Embeddings ---
 embedder = HuggingFaceEmbeddings(model_name=HF_EMBED_MODEL)
@@ -52,15 +54,22 @@ def load_existing_index():
         st.error(f"Failed to load FAISS index: {e}")
         return None
 
-# --- OCR Table Extraction + Chunking ---
-def extract_tables_from_pdf(pdf_path):
+# --- OCR Table and Text Extraction ---
+def extract_tables_and_text_from_pdf(pdf_path):
     all_chunks = []
     os.makedirs("tables", exist_ok=True)
 
     images = convert_from_path(pdf_path, dpi=300)
     for page_num, img in enumerate(images):
-        ocr_df = pytesseract.image_to_data(img, output_type=pytesseract.Output.DATAFRAME)
+        # --- TEXT CHUNKS ---
+        full_text = pytesseract.image_to_string(img)
+        for i in range(0, len(full_text), TEXT_CHUNK_SIZE):
+            text_chunk = full_text[i:i+TEXT_CHUNK_SIZE].strip()
+            if text_chunk:
+                all_chunks.append(Document(page_content=f"Page {page_num+1} Text:\n{text_chunk}"))
 
+        # --- TABLE CHUNKS ---
+        ocr_df = pytesseract.image_to_data(img, output_type=pytesseract.Output.DATAFRAME)
         if "text" not in ocr_df.columns:
             continue
 
@@ -91,7 +100,6 @@ def extract_tables_from_pdf(pdf_path):
 
         headers = table_rows[0]
         rows = table_rows[1:]
-
         if not headers or not rows:
             continue
 
@@ -99,19 +107,21 @@ def extract_tables_from_pdf(pdf_path):
         if not clean_rows:
             continue
 
+        for i in range(0, len(clean_rows), ROW_CHUNK_SIZE):
+            partial_rows = clean_rows[i:i+ROW_CHUNK_SIZE]
+            formatted_rows = "\n".join([", ".join(r) for r in partial_rows])
+            chunk_text = f"Page {page_num+1} Table Chunk\nHeaders: {', '.join(headers)}\nRows:\n{formatted_rows}"
+            all_chunks.append(Document(page_content=chunk_text))
+
+        # Save table JSON (optional)
         table_json = {
             "headers": headers,
             "rows": clean_rows
         }
-
         table_id = str(uuid.uuid4())
         table_path = f"tables/table_{table_id}.json"
         with open(table_path, "w", encoding="utf-8") as f:
             json.dump(table_json, f, indent=2)
-
-        formatted_rows = "\n".join([", ".join(r) for r in clean_rows])
-        chunk_text = f"Headers: {', '.join(headers)}\nRows:\n{formatted_rows}"
-        all_chunks.append(Document(page_content=chunk_text))
 
     return all_chunks
 
@@ -123,7 +133,7 @@ def process_and_index(files):
         temp_path = os.path.join("temp", file.name)
         with open(temp_path, "wb") as f:
             f.write(file.getbuffer())
-        docs.extend(extract_tables_from_pdf(temp_path))
+        docs.extend(extract_tables_and_text_from_pdf(temp_path))
 
     if not docs:
         return None
@@ -143,10 +153,10 @@ def get_chain(vs):
     retriever = vs.as_retriever(search_kwargs={"k": TOP_K})
     prompt = ChatPromptTemplate.from_template(
         """
-        You are a smart table extraction assistant.
-        - Return well-structured answers in markdown.
-        - Use bullet points or tables if needed.
-        - Provide only the relevant information.
+        You are a smart document assistant.
+        - Answer questions based on extracted text and tables.
+        - Use bullet points, tables, or markdown formatting when possible.
+        - If the answer is not found, respond clearly.
 
         Context:
         {context}
@@ -169,7 +179,7 @@ with st.sidebar:
 
     if st.button("Extract & Index"):
         if st.session_state.uploaded_files:
-            with st.spinner("Extracting tables and indexing..."):
+            with st.spinner("Extracting tables and text..."):
                 vs = process_and_index(st.session_state.uploaded_files)
                 if vs:
                     st.session_state.vs = vs
@@ -217,13 +227,13 @@ if query:
                         if result and result.strip():
                             responses.append(f"### Q{idx+1}: {sub_q}\n\n{result.strip()}")
                         else:
-                            responses.append(f"### Q{idx+1}: {sub_q}\n\n\u26a0\ufe0f No relevant data found.")
+                            responses.append(f"### Q{idx+1}: {sub_q}\n\n⚠ No relevant data found.")
                     except Exception as sub_e:
-                        responses.append(f"### Q{idx+1}: {sub_q}\n\n\u26a0\ufe0f Error: {sub_e}")
+                        responses.append(f"### Q{idx+1}: {sub_q}\n\n⚠ Error: {sub_e}")
 
                 final_result = "\n\n---\n\n".join(responses)
             except Exception as e:
-                final_result = f" Critical Error: {e}"
+                final_result = f"⚠ Critical Error: {e}"
 
             st.session_state.msgs.append({"role": "assistant", "content": final_result})
 
