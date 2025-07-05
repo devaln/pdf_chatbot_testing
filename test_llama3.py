@@ -33,7 +33,7 @@ embedder = HuggingFaceEmbeddings(model_name=HF_EMBED_MODEL)
 # --- Streamlit UI ---
 st.set_page_config(page_title="PDF QA", layout="wide")
 st.title("PDF Q&A (Scanned Tables)")
-st.markdown("Ask questions like: 'What is the target for home visits?' or combine multiple queries with 'and', 'then'...")
+st.markdown("Ask questions like: 'What is the target for home visits?' or multiple queries using quotes and 'and/or' like \"query1\" and \"query2\"")
 
 # --- Session ---
 if "msgs" not in st.session_state:
@@ -113,7 +113,6 @@ def extract_tables_and_text_from_pdf(pdf_path):
             chunk_text = f"Page {page_num+1} Table Chunk\nHeaders: {', '.join(headers)}\nRows:\n{formatted_rows}"
             all_chunks.append(Document(page_content=chunk_text))
 
-        # Save table JSON (optional)
         table_json = {
             "headers": headers,
             "rows": clean_rows
@@ -156,7 +155,7 @@ def get_chain(vs):
         You are a smart document assistant.
         - Answer questions based on extracted text and tables.
         - Use bullet points, tables, or markdown formatting when possible.
-        - If the answer is not found, respond clearly.
+        - Return only relevant, clean, natural answers.
 
         Context:
         {context}
@@ -168,14 +167,20 @@ def get_chain(vs):
     llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
     return {"context": retriever, "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
 
+# --- Smart Split (quote-based multi-query only) ---
+def smart_split(query):
+    parts = re.findall(r'"(.*?)"', query)
+    return parts if len(parts) > 1 else [query]
+
 # --- Sidebar UI ---
 with st.sidebar:
     st.header("Upload Scanned PDFs")
-    uploader = st.file_uploader("Upload scanned PDF(s)", type="pdf", accept_multiple_files=True)
+    uploader = st.file_uploader("Upload scanned PDF(s)", type="pdf", accept_multiple_files=True, key="uploader")
     if uploader:
         st.session_state.uploaded_files = uploader
-        for f in uploader:
-            st.markdown(f"\u2705 {f.name}")
+        if st.session_state.uploaded_files:
+            for f in st.session_state.uploaded_files:
+                st.markdown(f"\u2705 {f.name}")
 
     if st.button("Extract & Index"):
         if st.session_state.uploaded_files:
@@ -184,8 +189,8 @@ with st.sidebar:
                 if vs:
                     st.session_state.vs = vs
                     st.session_state.msgs = []
-                    st.success("\u2705 Indexing complete!")
                     st.session_state.uploaded_files = []
+                    st.rerun()
         else:
             st.warning("Please upload PDFs first.")
 
@@ -195,19 +200,11 @@ with st.sidebar:
     if st.button("Clear FAISS Index"):
         shutil.rmtree(DB_DIR, ignore_errors=True)
         st.session_state.vs = None
-        st.success("\ud83d\uddd1\ufe0f FAISS index deleted.")
-
-# --- Load existing index if available ---
-if st.session_state.vs is None:
-    st.session_state.vs = load_existing_index()
-
-# --- Smart Split ---
-def smart_split(query):
-    return [q.strip() for q in re.split(r'\b(?:and|or|then|next|also|after that|followed by|&|\n)\b', query, flags=re.IGNORECASE) if q.strip()]
+        st.success("🗑 FAISS index deleted.")
 
 # --- Chat UI ---
 st.markdown("### Ask your question")
-query = st.chat_input("Ask questions (e.g. 'target and number trained')")
+query = st.chat_input("Ask questions like \"target\" and \"trained staff\"")
 
 if query:
     if not st.session_state.vs:
@@ -216,22 +213,22 @@ if query:
         sub_queries = smart_split(query)
         st.session_state.msgs.append({"role": "user", "content": query})
 
-        with st.spinner("Thinking through your multi-part query..."):
+        with st.spinner("Answering your query..."):
             try:
                 chain = get_chain(st.session_state.vs)
                 responses = []
 
-                for idx, sub_q in enumerate(sub_queries):
+                for sub_q in sub_queries:
                     try:
                         result = chain.invoke(sub_q)
                         if result and result.strip():
-                            responses.append(f"### Q{idx+1}: {sub_q}\n\n{result.strip()}")
+                            responses.append(result.strip())
                         else:
-                            responses.append(f"### Q{idx+1}: {sub_q}\n\n⚠ No relevant data found.")
+                            responses.append("⚠ No relevant data found.")
                     except Exception as sub_e:
-                        responses.append(f"### Q{idx+1}: {sub_q}\n\n⚠ Error: {sub_e}")
+                        responses.append(f"⚠ Error: {sub_e}")
 
-                final_result = "\n\n---\n\n".join(responses)
+                final_result = "\n\n".join(responses)
             except Exception as e:
                 final_result = f"⚠ Critical Error: {e}"
 
