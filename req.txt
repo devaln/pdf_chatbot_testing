@@ -1,0 +1,13 @@
+streamlit>=1.30.0
+pandas>=1.5.3
+fuzzywuzzy
+python-Levenshtein
+sentence-transformers
+langchain>=0.1.14
+langchain-community
+langchain-docling
+docling>=0.1.36
+openai
+pandasql
+faiss-cpu
+PyMuPDF
