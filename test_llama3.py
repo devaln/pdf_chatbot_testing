@@ -165,7 +165,7 @@ with st.sidebar:
     if uploader:
         st.session_state.uploaded_files = uploader
         for f in uploader:
-            st.markdown(f"\u2705 {f.name}")
+            st.markdown(f"✅ {f.name}")
 
     if st.button("Extract & Index"):
         if st.session_state.uploaded_files:
@@ -174,7 +174,7 @@ with st.sidebar:
                 if vs:
                     st.session_state.vs = vs
                     st.session_state.msgs = []
-                    st.success("\u2705 Indexing complete!")
+                    st.success("✅ Indexing complete!")
                     st.session_state.uploaded_files = []
         else:
             st.warning("Please upload PDFs first.")
@@ -185,7 +185,7 @@ with st.sidebar:
     if st.button("Clear FAISS Index"):
         shutil.rmtree(DB_DIR, ignore_errors=True)
         st.session_state.vs = None
-        st.success("\ud83d\uddd1\ufe0f FAISS index deleted.")
+        st.success("🌟 FAISS index deleted.")  # ✅ Fixed Unicode issue here
 
 # --- Load existing index if available ---
 if st.session_state.vs is None:
@@ -217,13 +217,13 @@ if query:
                         if result and result.strip():
                             responses.append(f"### Q{idx+1}: {sub_q}\n\n{result.strip()}")
                         else:
-                            responses.append(f"### Q{idx+1}: {sub_q}\n\n\u26a0\ufe0f No relevant data found.")
+                            responses.append(f"### Q{idx+1}: {sub_q}\n\n⚠ No relevant data found.")
                     except Exception as sub_e:
-                        responses.append(f"### Q{idx+1}: {sub_q}\n\n\u26a0\ufe0f Error: {sub_e}")
+                        responses.append(f"### Q{idx+1}: {sub_q}\n\n⚠ Error: {sub_e}")
 
                 final_result = "\n\n---\n\n".join(responses)
             except Exception as e:
-                final_result = f" Critical Error: {e}"
+                final_result = f"❌ Critical Error: {e}"
 
             st.session_state.msgs.append({"role": "assistant", "content": final_result})
 
