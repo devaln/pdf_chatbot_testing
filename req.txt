@@ -3,11 +3,9 @@ pandas>=1.5.3
 fuzzywuzzy
 python-Levenshtein
 sentence-transformers
-langchain>=0.1.14
-langchain-community
-langchain-docling
 docling>=0.1.36
-openai
+langchain>=0.1.14
+langchain-community>=0.0.20
+faiss-cpu  # or faiss-gpu if you're using a GPU
+openai  # required by some langchain internals
 pandasql
-faiss-cpu
-PyMuPDF
