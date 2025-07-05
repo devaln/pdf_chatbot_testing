@@ -31,7 +31,7 @@ TOP_K = 5
 class HuggingFaceEmbedder:
     def _init_(self):
         from sentence_transformers import SentenceTransformer
-        self.model = SentenceTransformer("intfloat/e5-large-v2")
+        self.model = SentenceTransformer("e5-large-v2")
 
     def embed_documents(self, texts):
         return self.model.encode(texts, normalize_embeddings=True).tolist()
