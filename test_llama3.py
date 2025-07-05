@@ -8,13 +8,12 @@ import pandas as pd
 from fuzzywuzzy import fuzz
 import pandasql as psql
 
-from sentence_transformers import SentenceTransformer
 from langchain.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_community.chat_models import ChatOllama
+from langchain_community.embeddings import OllamaEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.runnables import RunnablePassthrough
 
 from langchain_docling import DoclingLoader
@@ -24,22 +23,12 @@ from docling.chunking import HybridChunker
 # --- Config ---
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_LLM_MODEL = "llama3:latest"
+OLLAMA_EMBED_MODEL = "nomic-embed-text:latest"
 DB_DIR = "./faiss_db"
 TOP_K = 5
 
-# --- Embedding Wrapper ---
-class HuggingFaceEmbedder:
-    def _init_(self):
-        from sentence_transformers import SentenceTransformer
-        self.model = SentenceTransformer("e5-large-v2")
-
-    def embed_documents(self, texts):
-        return self.model.encode(texts, normalize_embeddings=True).tolist()
-
-    def embed_query(self, query):
-        return self.model.encode(query, normalize_embeddings=True).tolist()
-
-embedder = HuggingFaceEmbedder()
+# --- Embedding ---
+embedder = OllamaEmbeddings(model=OLLAMA_EMBED_MODEL, base_url=OLLAMA_BASE_URL)
 
 # --- App UI ---
 st.set_page_config(page_title="PDF QA with Docling", layout="wide")
@@ -69,7 +58,7 @@ def load_and_index(files):
             loader = DoclingLoader(
                 file_path=temp_path,
                 export_type=ExportType.DOC_CHUNKS,
-                chunker=HybridChunker(tokenizer="intfloat/e5-large-v2")
+                chunker=HybridChunker(tokenizer=OLLAMA_EMBED_MODEL)
             )
 
             try:
@@ -84,10 +73,7 @@ def load_and_index(files):
 
     texts = [d.page_content for d in all_docs]
     metadatas = [d.metadata for d in all_docs]
-    vectors = embedder.embed_documents(texts)
-
-    clean_docs = [Document(page_content=texts[i], metadata=metadatas[i])
-                  for i in range(len(texts)) if vectors[i] and sum(vectors[i]) != 0]
+    clean_docs = [Document(page_content=texts[i], metadata=metadatas[i]) for i in range(len(texts))]
 
     if os.path.exists(DB_DIR):
         vs = FAISS.load_local(DB_DIR, embedder, allow_dangerous_deserialization=True)
@@ -156,8 +142,6 @@ def clear_db():
 
 # --- Sidebar ---
 with st.sidebar:
-    st.image("img/ACL_Digital.png", width=180)
-    st.image("img/Cipla_Foundation.png", width=180)
     st.markdown("---")
     st.header("\U0001F4C2 Upload PDFs")
 
