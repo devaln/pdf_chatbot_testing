@@ -22,7 +22,7 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_LLM_MODEL = "llama3:latest"
 OLLAMA_EMBED_MODEL = "nomic-embed-text:latest"
 DB_DIR = "./faiss_db"
-TOP_K = 5
+TOP_K = 10
 
 # --- Embedding ---
 embedder = OllamaEmbeddings(model=OLLAMA_EMBED_MODEL, base_url=OLLAMA_BASE_URL)
@@ -62,8 +62,8 @@ def process_and_index(files):
 
         loader = DoclingLoader(
             file_path=temp_path,
-            export_type=ExportType.DOC_CHUNKS,
-            chunker=HybridChunker(tokenizer="intfloat/e5-base")
+            export_type=ExportType.DOC_JSON,  # preserves full table structure
+            chunker=HybridChunker(tokenizer=OLLAMA_EMBED_MODEL, mode="table-first")
         )
         try:
             docs.extend(loader.load())
@@ -73,12 +73,10 @@ def process_and_index(files):
     if not docs:
         return None
 
-    # Prepare for embedding
     texts = [d.page_content for d in docs]
     metadatas = [d.metadata for d in docs]
     valid_docs = [Document(page_content=texts[i], metadata=metadatas[i]) for i in range(len(texts))]
 
-    # Save to FAISS
     if Path(DB_DIR).exists():
         vs = FAISS.load_local(DB_DIR, embedder, allow_dangerous_deserialization=True)
         vs.add_documents(valid_docs)
@@ -87,14 +85,24 @@ def process_and_index(files):
     vs.save_local(DB_DIR)
     return vs
 
-# --- LLM Chain with Smart Prompt ---
+# --- LLM Chain ---
 def get_chain(vs):
     retriever = vs.as_retriever(search_kwargs={"k": TOP_K})
     prompt = ChatPromptTemplate.from_template(
-        "You are a smart PDF analysis assistant.\n\n"
-        "If the user asks about a column (e.g., 'number of persons benefitted'), return all values under that column.\n"
-        "If the user asks about a specific row (e.g., 'teachers in CSR Project 2'), match that row and return relevant values.\n\n"
-        "Use only the context provided below:\n{context}\n\nQuestion: {question}\n\nAnswer:"
+        """
+        You are a smart PDF analysis assistant.
+
+        - If the user asks about a column (e.g., 'number of persons benefitted'), return all values under that column from every row.
+        - If the user asks about a specific row (e.g., mentioning a CSR project or a teacher/child group), match that row based on content and return its values.
+        - Always extract complete structured data if available.
+
+        Use only the context provided below:
+        {context}
+
+        Question: {question}
+
+        Answer:
+        """
     )
     llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
     return {"context": retriever, "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
@@ -128,18 +136,16 @@ with st.sidebar:
         st.session_state.vs = None
         st.success("🗑 FAISS index deleted.")
 
-# --- Load Existing Index (if any) ---
+# --- Load Existing Index ---
 if st.session_state.vs is None:
     st.session_state.vs = load_existing_index()
 
-# --- Chat Interface ---
+# --- Chat UI ---
 st.markdown("### 💬 Ask your question")
-query = st.text_input("E.g. What is the number of persons benefitted?")
+query = st.chat_input("Type your question here...")
 
-if st.button("🔍 Ask"):
-    if not query.strip():
-        st.warning("Please enter a valid question.")
-    elif not st.session_state.vs:
+if query:
+    if not st.session_state.vs:
         st.error("Please upload and index PDFs first.")
     else:
         st.session_state.msgs.append({"role": "user", "content": query})
@@ -154,8 +160,6 @@ if st.button("🔍 Ask"):
             st.session_state.msgs.append({"role": "assistant", "content": result})
 
 # --- Chat Display ---
-if st.session_state.msgs:
-    st.markdown("### 🧠 Chat History")
-    for msg in st.session_state.msgs:
-        icon = "👤" if msg["role"] == "user" else "🤖"
-        st.markdown(f"{icon} *{msg['role'].capitalize()}*: {msg['content']}")
+for msg in st.session_state.msgs:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
