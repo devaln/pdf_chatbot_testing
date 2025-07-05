@@ -8,7 +8,7 @@ from pathlib import Path
 from langchain.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_community.chat_models import ChatOllama
-from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
@@ -20,12 +20,12 @@ from docling.chunking import HybridChunker
 # --- Config ---
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_LLM_MODEL = "llama3:latest"
-OLLAMA_EMBED_MODEL = "nomic-embed-text:latest"
+HF_EMBED_MODEL = "intfloat/e5-base"
 DB_DIR = "./faiss_db"
 TOP_K = 10
 
 # --- Embedding ---
-embedder = OllamaEmbeddings(model=OLLAMA_EMBED_MODEL, base_url=OLLAMA_BASE_URL)
+embedder = HuggingFaceEmbeddings(model_name=HF_EMBED_MODEL)
 
 # --- App UI ---
 st.set_page_config(page_title="PDF QA using Docling", layout="wide")
@@ -63,7 +63,7 @@ def process_and_index(files):
         loader = DoclingLoader(
             file_path=temp_path,
             export_type=ExportType.DOC_CHUNKS,
-            chunker=HybridChunker(tokenizer="nomic-embed-text", mode="table_first")
+            chunker=HybridChunker(tokenizer="intfloat/e5-base", mode="table_first")
         )
         try:
             docs.extend(loader.load())
