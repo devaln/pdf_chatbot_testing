@@ -58,7 +58,7 @@ def load_and_index(files):
             loader = DoclingLoader(
                 file_path=temp_path,
                 export_type=ExportType.DOC_CHUNKS,
-                chunker=HybridChunker(tokenizer=OLLAMA_EMBED_MODEL)
+                chunker=HybridChunker(tokenizer="intfloat/e5-base")
             )
 
             try:
