@@ -59,19 +59,25 @@ def extract_tables_from_pdf(pdf_path):
     images = convert_from_path(pdf_path, dpi=300)
     for page_num, img in enumerate(images):
         ocr_df = pytesseract.image_to_data(img, output_type=pytesseract.Output.DATAFRAME)
-        ocr_df = ocr_df.dropna(subset=["text"])
-        ocr_df = ocr_df[ocr_df.text.str.strip() != ""]
+
+        # ✅ Ensure 'text' column exists and convert to string
+        if "text" not in ocr_df.columns:
+            continue
+        ocr_df["text"] = ocr_df["text"].astype(str)
+        ocr_df = ocr_df[ocr_df["text"].str.strip() != ""]
 
         lines = []
         for _, row in ocr_df.iterrows():
-            lines.append((row["top"], row["text"]))
+            try:
+                lines.append((int(row["top"]), row["text"]))
+            except:
+                continue
 
         # Group lines by similar 'top' position (i.e., same row)
         grouped = {}
         for top, word in lines:
-            key = min(grouped.keys(), default=top + 100)
             found = False
-            for k in list(grouped.keys()):
+            for k in grouped.keys():
                 if abs(k - top) < 10:
                     grouped[k].append(word)
                     found = True
@@ -79,14 +85,15 @@ def extract_tables_from_pdf(pdf_path):
             if not found:
                 grouped[top] = [word]
 
-        # Convert grouped lines into rows
         table_rows = list(grouped.values())
-
         if len(table_rows) < 2:
-            continue  # skip pages without tables
+            continue  # Skip if not enough rows for a table
 
         headers = table_rows[0]
         rows = table_rows[1:]
+
+        if not headers or not rows:
+            continue  # Skip tables with no meaningful data
 
         table_json = {
             "title": "Operational Achievement",
@@ -164,6 +171,7 @@ with st.sidebar:
                     st.session_state.vs = vs
                     st.session_state.msgs = []
                     st.success("✅ Indexing complete!")
+                    # ✅ Clear uploaded files from sidebar
                     st.session_state.uploaded_files = []
         else:
             st.warning("Please upload PDFs first.")
