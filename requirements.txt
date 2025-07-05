@@ -25,4 +25,4 @@ torch>=1.13.0  # required for transformers if not already installed
 pandas>=1.5.3
 uuid
 pathlib
-shutil
+pytest-shutil
