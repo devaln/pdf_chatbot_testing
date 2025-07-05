@@ -62,7 +62,7 @@ def process_and_index(files):
 
         loader = DoclingLoader(
             file_path=temp_path,
-            export_type=ExportType.JSON,  # preserves full table structure
+            export_type=ExportType.DOC_CHUNKS,
             chunker=HybridChunker(tokenizer=OLLAMA_EMBED_MODEL, mode="table-first")
         )
         try:
