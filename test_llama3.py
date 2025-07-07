@@ -59,6 +59,8 @@ def extract_tables_and_text_from_pdf(pdf_path, file_name):
     all_chunks = []
     os.makedirs("tables", exist_ok=True)
 
+    print(file_name)
+
     images = convert_from_path(pdf_path, dpi=300)
     for page_num, img in enumerate(images):
         # --- TEXT CHUNKS ---
@@ -168,7 +170,9 @@ def get_chain(vs):
     prompt = ChatPromptTemplate.from_template(
         """
         You are a smart document assistant.
-        - Provide accurate answers based on the extracted text and tables.
+        - Answer questions based on extracted text and tables from uploaded PDFs.
+        - For every fact you mention, include the document name and page number from which it was retrieved (e.g., *[source.pdf, page 3]*).
+        - Use bullet points, tables, or markdown formatting when possible.
         - Use clear bullet points, tables, or markdown formatting whenever appropriate.
         - If the answer cannot be found in the provided context, respond explicitly that the information is not available.
         - Always mention the document name and page number(s) in your answer if available.
