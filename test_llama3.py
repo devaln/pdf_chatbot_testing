@@ -59,7 +59,9 @@ def extract_tables_and_text_from_pdf(pdf_path, file_name):
     all_chunks = []
     os.makedirs("tables", exist_ok=True)
 
+    
     print(file_name)
+    
 
     images = convert_from_path(pdf_path, dpi=300)
     for page_num, img in enumerate(images):
@@ -139,6 +141,7 @@ def extract_tables_and_text_from_pdf(pdf_path, file_name):
         with open(table_path, "w", encoding="utf-8") as f:
             json.dump(table_json, f, indent=2)
 
+    print(all_chunks)
     return all_chunks
 
 # --- Index PDFs ---
