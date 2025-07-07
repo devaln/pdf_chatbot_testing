@@ -157,7 +157,7 @@ def get_chain(vs):
         - Answer questions based on extracted text and tables.
         - Use bullet points, tables, or markdown formatting when possible.
         - If the answer is not found, respond clearly.
-        - Don't give me the document id form the context.
+        - Please do not mention any internal document IDs or metadata like UUIDs in the answer. Focus only on the extracted content.
 
         Context:
         {context}
