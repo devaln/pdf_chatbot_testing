@@ -581,6 +581,7 @@ TEXT_CHUNK_SIZE = 500
 
 # --- Embeddings ---
 embedder = HuggingFaceEmbeddings(model_name=HF_EMBED_MODEL)
+st.set_option('server.maxUploadSize', 100)
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="PDF QA", layout="wide")
