@@ -192,9 +192,7 @@ def get_chain(vs):
     llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
 
     print(f"****************************")
-    print(llm)
-    print(f"****************************")
-    print(retriever)
+    print(prompt)
     print(f"****************************")
 
     return {"context": retriever, "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
