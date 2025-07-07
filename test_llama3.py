@@ -170,6 +170,9 @@ def get_chain(vs):
 
 # --- Sidebar UI ---
 with st.sidebar:
+    st.image("img/ACL_Digital.png", width=180)
+    st.image("img/Cipla_Foundation.png", width=180)
+    st.markdown("---")
     st.header("Upload Scanned PDFs")
     uploader = st.file_uploader("Upload scanned PDF(s)", type="pdf", accept_multiple_files=True)
     if uploader:
