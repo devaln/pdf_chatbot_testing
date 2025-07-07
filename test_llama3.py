@@ -118,7 +118,14 @@ def extract_tables_and_text_from_pdf(pdf_path, file_name):
             partial_rows = clean_rows[i:i+ROW_CHUNK_SIZE]
             formatted_rows = "\n".join([", ".join(r) for r in partial_rows])
             chunk_text = f"Page {page_num+1} Table Chunk\nHeaders: {', '.join(headers)}\nRows:\n{formatted_rows}"
-            all_chunks.append(Document(page_content=chunk_text))
+            all_chunks.append(Document(
+                    page_content=f"{chunk_text}",
+                    metadata={
+                        "source": file_name,
+                        "page": page_num,
+                        "type": "text"
+                    }
+                ))
 
         # Save table JSON (optional)
         table_json = {
