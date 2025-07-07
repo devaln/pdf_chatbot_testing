@@ -284,8 +284,7 @@ embedder = HuggingFaceEmbeddings(model_name=HF_EMBED_MODEL)
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="PDF QA", layout="wide")
-st.title("PDF Q&A (Scanned Tables)")
-st.markdown("Ask questions like: 'What is the target for home visits?' or combine multiple queries with 'and', 'then'...")
+st.title("Upload your PDF Documents or Scanned Documents in .pdf format.")
 
 # --- Session ---
 if "msgs" not in st.session_state:
