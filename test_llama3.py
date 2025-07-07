@@ -141,7 +141,6 @@ def extract_tables_and_text_from_pdf(pdf_path, file_name):
         with open(table_path, "w", encoding="utf-8") as f:
             json.dump(table_json, f, indent=2)
 
-    print(all_chunks)
     return all_chunks
 
 # --- Index PDFs ---
@@ -191,6 +190,13 @@ def get_chain(vs):
         """
     )
     llm = ChatOllama(model=OLLAMA_LLM_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
+
+    print(f"****************************")
+    print(llm)
+    print(f"****************************")
+    print(retriever)
+    print(f"****************************")
+
     return {"context": retriever, "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
 
 # --- Sidebar UI ---
