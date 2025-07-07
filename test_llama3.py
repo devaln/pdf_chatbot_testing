@@ -726,6 +726,7 @@ def get_chain(vs):
 
         - Always include the document name and page number (if available) in your response.
         - Respond clearly and use bullet points or tables when appropriate.
+        - If you find multiple references don't rush to answer, instead ask the user for clarification about the document.
         - If no answer is found, say so confidently.
 
         Context:
