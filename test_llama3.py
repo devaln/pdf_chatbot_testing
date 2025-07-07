@@ -55,7 +55,7 @@ def load_existing_index():
         return None
 
 # --- OCR Table and Text Extraction ---
-def extract_tables_and_text_from_pdf(pdf_path):
+def extract_tables_and_text_from_pdf(pdf_path, file_name):
     all_chunks = []
     os.makedirs("tables", exist_ok=True)
 
@@ -66,7 +66,14 @@ def extract_tables_and_text_from_pdf(pdf_path):
         for i in range(0, len(full_text), TEXT_CHUNK_SIZE):
             text_chunk = full_text[i:i+TEXT_CHUNK_SIZE].strip()
             if text_chunk:
-                all_chunks.append(Document(page_content=f"Page {page_num+1} Text:\n{text_chunk}"))
+                all_chunks.append(Document(
+                    page_content=f"{text_chunk}",
+                    metadata={
+                        "source": file_name,
+                        "page": page_num,
+                        "type": "text"
+                    }
+                ))
 
         # --- TABLE CHUNKS ---
         ocr_df = pytesseract.image_to_data(img, output_type=pytesseract.Output.DATAFRAME)
@@ -133,7 +140,7 @@ def process_and_index(files):
         temp_path = os.path.join("temp", file.name)
         with open(temp_path, "wb") as f:
             f.write(file.getbuffer())
-        docs.extend(extract_tables_and_text_from_pdf(temp_path))
+        docs.extend(extract_tables_and_text_from_pdf(temp_path, file.name))
 
     if not docs:
         return None
@@ -154,16 +161,18 @@ def get_chain(vs):
     prompt = ChatPromptTemplate.from_template(
         """
         You are a smart document assistant.
-        - Answer questions based on extracted text and tables.
-        - Use bullet points, tables, or markdown formatting when possible.
-        - If the answer is not found, respond clearly.
-        - Mention the document name and page number in your answer if available.
-        - Do not include document ID or internal metadata.
+        - Provide accurate answers based on the extracted text and tables.
+        - Use clear bullet points, tables, or markdown formatting whenever appropriate.
+        - If the answer cannot be found in the provided context, respond explicitly that the information is not available.
+        - Always mention the document name and page number(s) in your answer if available.
+        - Do not include document IDs or internal system metadata in your response.
 
-        Context (includes document name and page if present):
+        Context (includes document name and page information):
         {context}
 
-        Question: {question}
+        Question:
+        {question}
+
         Answer:
         """
     )
