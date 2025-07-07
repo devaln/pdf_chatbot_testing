@@ -573,7 +573,7 @@ import re
 # --- Config ---
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_LLM_MODEL = "llama3:latest"
-HF_EMBED_MODEL = "intfloat/e5-large"
+HF_EMBED_MODEL = "intfloat/e5-base"
 DB_DIR = "./faiss_db"
 TOP_K = 5
 ROW_CHUNK_SIZE = 10
