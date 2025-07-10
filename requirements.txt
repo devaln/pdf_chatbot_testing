@@ -19,10 +19,10 @@ opencv-python
 langchain
 langchain-core
 langchain-community
-git+https://github.com/langchain-ai/langchain.git@master#subdirectory=libs/experimental
+# git+https://github.com/langchain-ai/langchain.git@master#subdirectory=libs/experimental
 
 # Chart OCR
-ChartOCR @ git+https://github.com/zmykevin/ChartOCR.git
+ChartOCR # @ git+https://github.com/zmykevin/ChartOCR.git
 
 # Embeddings
 sentence-transformers
