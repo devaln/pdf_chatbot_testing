@@ -11,7 +11,7 @@ regex
 
 # Layout-aware processing
 layoutparser[layoutmodels]
-torch==1.13.1
+torch
 torchvision
 opencv-python
 
