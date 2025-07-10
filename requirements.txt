@@ -1,28 +1,32 @@
-# Streamlit for the web app UI
-streamlit>=1.30.0
+# Core dependencies
+streamlit
+pandas
+pdf2image
+pytesseract
+Pillow
+faiss-cpu
+scikit-learn
+tqdm
+regex
 
-# LangChain for retrieval-augmented generation pipeline
-langchain>=0.1.14
-langchain-core>=0.1.50
-langchain-community>=0.0.25
+# Layout-aware processing
+layoutparser[layoutmodels]
+torch==1.13.1
+torchvision
+opencv-python
 
-# FAISS for vector storage
-faiss-cpu  # use faiss-gpu if running on a GPU-enabled server
+# LLM + RAG
+langchain
+langchain-core
+langchain-community
+git+https://github.com/langchain-ai/langchain.git@master#subdirectory=libs/experimental
 
-# Ollama-compatible chat model
-openai  # required internally by some LangChain features
+# Chart OCR
+ChartOCR @ git+https://github.com/zmykevin/ChartOCR.git
 
-# Docling for advanced PDF extraction (tables + text)
-docling>=0.1.36
-langchain-docling>=0.1.4
+# Embeddings
+sentence-transformers
 
-# Embedding model from HuggingFace
-sentence-transformers>=2.2.2  # required by HuggingFaceEmbeddings
-transformers>=4.30.0
-torch>=1.13.0  # required for transformers if not already installed
-
-# Utility packages
-pandas>=1.5.3
-uuid
-pathlib
-pytest-shutil
+# Optional
+python-dotenv
+watchdog
