@@ -38,7 +38,7 @@ TEXT_CHUNK_SIZE = 500
 os.makedirs(TABLE_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
 embedder = HuggingFaceEmbeddings(model_name=HF_EMBED_MODEL)
-ocr = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+ocr = PaddleOCR(use_angle_cls=True, lang='en')
 
 if "msgs" not in st.session_state: st.session_state.msgs = []
 if "vs" not in st.session_state: st.session_state.vs = None
