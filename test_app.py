@@ -54,7 +54,7 @@ def extract_from_pdf(pdf_path):
     images = convert_from_path(pdf_path, dpi=300)
     for pn, img in enumerate(images):
         img = img.convert("RGB")
-        result = ocr.ocr(np.array(img), cls=True)
+        result = ocr.ocr(np.array(img))
         text_lines = [line[1][0].strip() for line in result[0] if line[1][0].strip()]
         full_text = "\n".join(text_lines)
         for i in range(0, len(full_text), TEXT_CHUNK_SIZE):
