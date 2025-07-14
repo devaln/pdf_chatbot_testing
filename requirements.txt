@@ -1,32 +1,34 @@
-# Core dependencies
+# Streamlit App
 streamlit
-pandas
+
+# OCR
+paddleocr
+paddlepaddle
+
+# PDF, Image, OCR Handling
 pdf2image
 pytesseract
-Pillow
+pillow
+numpy
+
+# Document Parsing
+python-docx
+openpyxl  # for reading Excel (.xlsx)
+xlrd       # for older Excel (.xls)
+
+# Data Handling
+pandas
+
+# LangChain + FAISS + LLM
 faiss-cpu
-scikit-learn
-tqdm
-regex
-
-# Layout-aware processing
-layoutparser[layoutmodels]
-torch
-torchvision
-opencv-python
-
-# LLM + RAG
 langchain
 langchain-core
 langchain-community
-# git+https://github.com/langchain-ai/langchain.git@master#subdirectory=libs/experimental
-
-# Chart OCR
-ChartOCR # @ git+https://github.com/zmykevin/ChartOCR.git
-
-# Embeddings
+langchain-experimental
 sentence-transformers
+transformers
+torch
+huggingface-hub
 
-# Optional
-python-dotenv
-watchdog
+# Utilities
+tqdm
